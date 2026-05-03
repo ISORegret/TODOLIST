@@ -66,6 +66,7 @@ function mapRow(row) {
 
 export default function App() {
   const [authReady, setAuthReady] = useState(false)
+  const [authError, setAuthError] = useState(null)
   const [roomId, setRoomId] = useState(() => localStorage.getItem(LS_ROOM) || '')
   const [joinCodeDisplay, setJoinCodeDisplay] = useState(
     () => localStorage.getItem(LS_JOIN) || '',
@@ -196,6 +197,19 @@ export default function App() {
     setNotifPerm(perm)
   }
 
+  const ensureAnonymousSession = useCallback(async () => {
+    if (!supabase) return { ok: false, message: 'App is not connected.' }
+    const { data: { session: s0 } } = await supabase.auth.getSession()
+    if (s0?.user) return { ok: true }
+    const { error } = await supabase.auth.signInAnonymously()
+    if (error) return { ok: false, message: error.message || String(error) }
+    const { data: { session: s1 } } = await supabase.auth.getSession()
+    if (!s1?.user) {
+      return { ok: false, message: 'No session after anonymous sign-in.' }
+    }
+    return { ok: true }
+  }, [supabase])
+
   const loadMembers = useCallback(async (rid) => {
     if (!supabase) return
     const { data, error } = await supabase
@@ -212,26 +226,21 @@ export default function App() {
     if (!supabase) return
     let cancelled = false
     ;(async () => {
-      const { data: { session } } = await supabase.auth.getSession()
-      if (!session) {
-        const { error } = await supabase.auth.signInAnonymously()
-        if (error) {
-          console.error(error)
-          if (!cancelled) {
-            showToast('Could not sign in. Enable Anonymous auth in Supabase.')
-          }
-        }
+      const r = await ensureAnonymousSession()
+      if (cancelled) return
+      if (r.ok) setAuthError(null)
+      else {
+        setAuthError(
+          r.message
+            || 'Anonymous sign-in failed. In the Supabase dashboard: Authentication → Providers → turn on Anonymous sign-ins. On your phone, allow cookies / cross-site storage for this site if the browser blocks them.',
+        )
       }
-      if (!cancelled) setAuthReady(true)
+      setAuthReady(true)
     })()
-    const { data: sub } = supabase.auth.onAuthStateChange(() => {
-      if (!cancelled) setAuthReady(true)
-    })
     return () => {
       cancelled = true
-      sub.subscription.unsubscribe()
     }
-  }, [showToast])
+  }, [ensureAnonymousSession, supabase])
 
   const loadTasks = useCallback(async () => {
     const rid = roomIdRef.current
@@ -373,6 +382,14 @@ export default function App() {
     if (!nameIn.trim() || !supabase) return
     setRoomBusy(true)
     setRoomError('')
+    const auth = await ensureAnonymousSession()
+    if (!auth.ok) {
+      setRoomBusy(false)
+      setRoomError(
+        `${auth.message || 'Not signed in'}. Enable Anonymous sign-in in Supabase, then reload this page.`,
+      )
+      return
+    }
     const { data, error } = await supabase.rpc('create_room')
     setRoomBusy(false)
     if (error) {
@@ -412,6 +429,14 @@ export default function App() {
     if (!nameIn.trim() || !joinCodeIn.trim() || !supabase) return
     setRoomBusy(true)
     setRoomError('')
+    const auth = await ensureAnonymousSession()
+    if (!auth.ok) {
+      setRoomBusy(false)
+      setRoomError(
+        `${auth.message || 'Not signed in'}. Enable Anonymous sign-in in Supabase, then reload this page.`,
+      )
+      return
+    }
     const { data: rid, error } = await supabase.rpc('join_room', {
       p_code: joinCodeIn.trim(),
     })
@@ -570,6 +595,21 @@ export default function App() {
       <div className="app">
         <div className="setup-screen">
           <div className="setup-label">Connecting…</div>
+        </div>
+      </div>
+    )
+  }
+
+  if (authError) {
+    return (
+      <div className="app">
+        <div className="setup-screen">
+          <div className="config-missing">
+            <p style={{ marginBottom: 12 }}>{authError}</p>
+            <button type="button" className="setup-go" onClick={() => window.location.reload()}>
+              Reload page
+            </button>
+          </div>
         </div>
       </div>
     )
