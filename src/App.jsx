@@ -1,5 +1,10 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
-import { supabase, supabaseConfigured, supabaseEnvPresent } from './lib/supabaseClient'
+import {
+  supabase,
+  supabaseConfigured,
+  supabaseEnvPresent,
+  supabaseInitError,
+} from './lib/supabaseClient'
 import './duo-todo.css'
 
 const LS_ROOM = 'duo-room-id'
@@ -532,7 +537,7 @@ export default function App() {
   if (!supabaseConfigured) {
     const invalid =
       supabaseEnvPresent &&
-      'Supabase URL or anon key is set but invalid. Open the browser console (F12). For GitHub Pages, check Actions secrets: no quotes, no spaces; URL must start with https:// and end with .supabase.co'
+      'Supabase URL or anon key is set but failed to initialize. Fix the values below (common: smart quotes, line breaks inside the JWT, or the secret name pasted into the value). Use Repository secrets (Settings → Secrets and variables → Actions), not only the Pages environment.'
     const missing =
       'In the project folder, copy .env.example to .env. In Supabase: Project Settings → API, set VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY, then restart npm run dev. For the live site, set the same names in the GitHub repository Actions secrets and redeploy.'
     return (
@@ -540,6 +545,20 @@ export default function App() {
         <div className="setup-screen">
           <div className="config-missing">
             <p>{invalid || missing}</p>
+            {supabaseInitError && (
+              <pre
+                style={{
+                  marginTop: 14,
+                  textAlign: 'left',
+                  fontSize: 12,
+                  whiteSpace: 'pre-wrap',
+                  wordBreak: 'break-word',
+                  color: '#c9a0a0',
+                }}
+              >
+                {supabaseInitError}
+              </pre>
+            )}
           </div>
         </div>
       </div>

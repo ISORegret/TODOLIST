@@ -1,16 +1,34 @@
 import { createClient } from '@supabase/supabase-js'
 
-const url = (import.meta.env.VITE_SUPABASE_URL ?? '').trim()
-const anonKey = (import.meta.env.VITE_SUPABASE_ANON_KEY ?? '').trim()
+/** Strip BOM, smart quotes, accidental wrapping; ignore literal "undefined" from mis-set CI vars */
+function cleanEnv(raw) {
+  let s = String(raw ?? '')
+    .replace(/^\uFEFF/, '')
+    .trim()
+    .replace(/^[\u201C\u201D'"`]+|[\u201C\u201D'"`]+$/g, '')
+    .trim()
+  if (!s || s === 'undefined' || s === 'null') return ''
+  return s
+}
 
-/** Env vars are non-empty (may still fail createClient if malformed) */
+const urlRaw = cleanEnv(import.meta.env.VITE_SUPABASE_URL)
+const anonRaw = cleanEnv(import.meta.env.VITE_SUPABASE_ANON_KEY)
+/** JWT must be one line — remove line breaks often introduced when pasting into GitHub Secrets */
+const anonKey = anonRaw.replace(/\s/g, '')
+const url = urlRaw.replace(/\/+$/, '')
+
+/** Env vars look configured after cleanup */
 export const supabaseEnvPresent = Boolean(url && anonKey)
 
 let client = null
+/** Set when createClient throws (shown in UI so you do not need the console) */
+export let supabaseInitError = ''
+
 if (supabaseEnvPresent) {
   try {
     client = createClient(url, anonKey)
   } catch (err) {
+    supabaseInitError = err?.message ? String(err.message) : String(err)
     console.error('Supabase createClient failed', err)
   }
 }
