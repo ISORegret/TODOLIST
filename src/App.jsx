@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
-import { supabase, supabaseConfigured } from './lib/supabaseClient'
+import { supabase, supabaseConfigured, supabaseEnvPresent } from './lib/supabaseClient'
 import './duo-todo.css'
 
 const LS_ROOM = 'duo-room-id'
@@ -530,17 +530,16 @@ export default function App() {
     members.filter((m) => m && m !== myName).join(', ') || 'your group'
 
   if (!supabaseConfigured) {
+    const invalid =
+      supabaseEnvPresent &&
+      'Supabase URL or anon key is set but invalid. Open the browser console (F12). For GitHub Pages, check Actions secrets: no quotes, no spaces; URL must start with https:// and end with .supabase.co'
+    const missing =
+      'In the project folder, copy .env.example to .env. In Supabase: Project Settings → API, set VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY, then restart npm run dev. For the live site, set the same names in the GitHub repository Actions secrets and redeploy.'
     return (
       <div className="app">
         <div className="setup-screen">
           <div className="config-missing">
-            <p>
-              In the project folder, copy <code>.env.example</code> to <code>.env</code>. In Supabase:{' '}
-              <strong>Project Settings → API</strong>, copy <strong>Project URL</strong> and the{' '}
-              <strong>anon public</strong> key into <code>.env</code> as{' '}
-              <code>VITE_SUPABASE_URL</code> and <code>VITE_SUPABASE_ANON_KEY</code>. Then stop and
-              start <code>npm run dev</code> again (Vite only reads <code>.env</code> on startup).
-            </p>
+            <p>{invalid || missing}</p>
           </div>
         </div>
       </div>

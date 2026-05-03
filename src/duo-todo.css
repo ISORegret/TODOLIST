@@ -1,4 +1,4 @@
-@import url('https://fonts.googleapis.com/css2?family=Lora:ital,wght@0,600;1,400&family=Outfit:wght@300;400;500;600&display=swap');
+/* Fonts loaded from index.html so a blocked @import cannot stall CSS parsing */
 
 * { box-sizing: border-box; margin: 0; padding: 0; }
 #root { min-height: 100vh; }
