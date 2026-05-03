@@ -22,18 +22,24 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
         with:
-          node-version: '22'
+          node-version: '24'
           cache: npm
-      - name: Install and build
+
+      - name: Install
+        run: npm ci
+
+      - name: Build
         env:
           VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
           VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
           VITE_BASE_PATH: /${{ github.event.repository.name }}/
-        run: npm ci && npm run build
-      - uses: actions/upload-pages-artifact@v3
+        run: npm run build
+
+      - uses: actions/upload-pages-artifact@v5
         with:
           path: dist
 
