@@ -36,7 +36,7 @@ jobs:
         env:
           VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
           VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
-          VITE_BASE_PATH: /${{ github.event.repository.name }}/
+          VITE_USE_RELATIVE_BASE: 'true'
         run: npm run build
 
       - uses: actions/upload-pages-artifact@v5
