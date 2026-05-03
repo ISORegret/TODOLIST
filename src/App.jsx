@@ -262,25 +262,77 @@ export default function App() {
     [loadMembers],
   )
 
+  const leaveRoom = useCallback(() => {
+    setupDoneRef.current = false
+    localStorage.removeItem(LS_ROOM)
+    localStorage.removeItem(LS_JOIN)
+    setRoomId('')
+    setJoinCodeDisplay('')
+    setMembers([])
+    setTasks([])
+    prevTasksRef.current = []
+    setSetupPhase(false)
+  }, [])
+
   useEffect(() => {
-    if (!authReady || !roomId || !supabaseConfigured || setupPhase) return
+    if (!authReady || !roomId || !supabaseConfigured || setupPhase || !supabase) return
+    const ridAtStart = roomId
     setupDoneRef.current = Boolean(myName.trim())
-    let ch = null
+    const chRef = { current: null }
+    let cancelled = false
 
     ;(async () => {
-      if (myName.trim()) await persistMyName(myName)
-      await loadMembers(roomId)
-      await loadTasks()
+      const { data: { user } } = await supabase.auth.getUser()
+      if (cancelled || roomIdRef.current !== ridAtStart) return
+      if (!user) return
 
-      ch = supabase
-        .channel(`tasks:${roomId}`)
+      let mem = null
+      for (let attempt = 0; attempt < 10; attempt++) {
+        const { data, error } = await supabase
+          .from('room_members')
+          .select('user_id')
+          .eq('room_id', ridAtStart)
+          .eq('user_id', user.id)
+          .maybeSingle()
+        if (error) {
+          console.error('room_members check', error)
+          if (!cancelled && roomIdRef.current === ridAtStart) {
+            showToast(`Could not verify list: ${error.message}`)
+          }
+          return
+        }
+        mem = data
+        if (mem) break
+        await new Promise((r) => setTimeout(r, 100))
+        if (cancelled || roomIdRef.current !== ridAtStart) return
+      }
+
+      if (cancelled || roomIdRef.current !== ridAtStart) return
+
+      if (!mem) {
+        showToast('This browser is no longer on the list — join again with your room code.')
+        if (!cancelled && roomIdRef.current === ridAtStart) leaveRoom()
+        return
+      }
+
+      if (myName.trim()) await persistMyName(myName)
+      if (cancelled || roomIdRef.current !== ridAtStart) return
+
+      await loadMembers(ridAtStart)
+      if (cancelled || roomIdRef.current !== ridAtStart) return
+
+      await loadTasks()
+      if (cancelled || roomIdRef.current !== ridAtStart) return
+
+      chRef.current = supabase
+        .channel(`tasks:${ridAtStart}`)
         .on(
           'postgres_changes',
           {
             event: '*',
             schema: 'public',
             table: 'tasks',
-            filter: `room_id=eq.${roomId}`,
+            filter: `room_id=eq.${ridAtStart}`,
           },
           () => {
             loadTasks()
@@ -290,9 +342,22 @@ export default function App() {
     })()
 
     return () => {
-      if (ch && supabase) supabase.removeChannel(ch)
+      cancelled = true
+      const c = chRef.current
+      chRef.current = null
+      if (c && supabase) supabase.removeChannel(c)
     }
-  }, [authReady, roomId, setupPhase, myName, loadTasks, persistMyName, loadMembers])
+  }, [
+    authReady,
+    roomId,
+    setupPhase,
+    myName,
+    loadTasks,
+    persistMyName,
+    loadMembers,
+    showToast,
+    leaveRoom,
+  ])
 
   function beginSetup() {
     setSetupPhase(true)
@@ -306,7 +371,14 @@ export default function App() {
     const { data, error } = await supabase.rpc('create_room')
     setRoomBusy(false)
     if (error) {
-      setRoomError(error.message || 'Could not create list')
+      console.error('create_room', error)
+      const hint =
+        /permission denied|function public.create_room|not authenticated/i.test(
+          error.message || '',
+        )
+          ? ' Check that the SQL migration ran and Anonymous sign-in is enabled.'
+          : ''
+      setRoomError((error.message || 'Could not create list') + hint)
       return
     }
     const row = Array.isArray(data) ? data[0] : data
@@ -359,18 +431,6 @@ export default function App() {
     setTasks([])
   }
 
-  function leaveRoom() {
-    setupDoneRef.current = false
-    localStorage.removeItem(LS_ROOM)
-    localStorage.removeItem(LS_JOIN)
-    setRoomId('')
-    setJoinCodeDisplay('')
-    setMembers([])
-    setTasks([])
-    prevTasksRef.current = []
-    setSetupPhase(false)
-  }
-
   function cancelSetup() {
     setRoomError('')
     setSetupPhase(false)
@@ -391,7 +451,15 @@ export default function App() {
     }
     const { error } = await supabase.from('tasks').insert(row)
     if (error) {
-      showToast('Could not add task')
+      console.error('addTask', error)
+      const rls =
+        error.code === '42501' ||
+        /row-level security|RLS|permission denied/i.test(error.message || '')
+      showToast(
+        rls
+          ? 'Not allowed to add tasks here — join the list again with your room code (session changed).'
+          : `Could not add task: ${error.message || error.code || 'unknown error'}`,
+      )
       return
     }
     setAddIn('')

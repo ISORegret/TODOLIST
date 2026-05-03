@@ -29,68 +29,61 @@ create table if not exists public.tasks (
 
 create index if not exists tasks_room_id_idx on public.tasks (room_id);
 
+-- Membership check must not SELECT room_members inside an RLS policy on room_members
+-- (infinite recursion). SECURITY DEFINER reads members with owner privileges (RLS bypassed).
+create or replace function public.is_room_member (p_room_id uuid)
+  returns boolean
+  language sql
+  security definer
+  set search_path = public
+  stable
+as $$
+  select exists (
+    select 1 from public.room_members rm
+    where rm.room_id = p_room_id and rm.user_id = auth.uid()
+  );
+$$;
+
+revoke all on function public.is_room_member (uuid) from public;
+grant execute on function public.is_room_member (uuid) to authenticated;
+
 alter table public.rooms enable row level security;
 alter table public.room_members enable row level security;
 alter table public.tasks enable row level security;
 
+-- Idempotent: safe to re-run after partial applies or policy tweaks
+drop policy if exists rooms_select on public.rooms;
+drop policy if exists room_members_select on public.room_members;
+drop policy if exists room_members_update on public.room_members;
+drop policy if exists tasks_select on public.tasks;
+drop policy if exists tasks_insert on public.tasks;
+drop policy if exists tasks_update on public.tasks;
+drop policy if exists tasks_delete on public.tasks;
+
 -- Rooms: visible to members
 create policy rooms_select on public.rooms
-  for select using (
-    exists (
-      select 1 from public.room_members m
-      where m.room_id = rooms.id and m.user_id = auth.uid()
-    )
-  );
+  for select using (public.is_room_member (id));
 
--- Members: see everyone in the same rooms you belong to
+-- Members: see everyone in rooms you belong to (no self-referential subquery)
 create policy room_members_select on public.room_members
-  for select using (
-    exists (
-      select 1 from public.room_members m
-      where m.room_id = room_members.room_id and m.user_id = auth.uid()
-    )
-  );
+  for select using (public.is_room_member (room_id));
 
 create policy room_members_update on public.room_members
   for update using (user_id = auth.uid()) with check (user_id = auth.uid());
 
 -- Tasks: CRUD only if room member
 create policy tasks_select on public.tasks
-  for select using (
-    exists (
-      select 1 from public.room_members m
-      where m.room_id = tasks.room_id and m.user_id = auth.uid()
-    )
-  );
+  for select using (public.is_room_member (room_id));
 
 create policy tasks_insert on public.tasks
-  for insert with check (
-    exists (
-      select 1 from public.room_members m
-      where m.room_id = tasks.room_id and m.user_id = auth.uid()
-    )
-  );
+  for insert with check (public.is_room_member (room_id));
 
 create policy tasks_update on public.tasks
-  for update using (
-    exists (
-      select 1 from public.room_members m
-      where m.room_id = tasks.room_id and m.user_id = auth.uid()
-    )
-  ) with check (
-    exists (
-      select 1 from public.room_members m
-      where m.room_id = tasks.room_id and m.user_id = auth.uid()
-    )
-  );
+  for update using (public.is_room_member (room_id))
+  with check (public.is_room_member (room_id));
 
 create policy tasks_delete on public.tasks
-  for delete using (
-    exists (
-      select 1 from public.room_members m
-      where m.room_id = tasks.room_id and m.user_id = auth.uid()
-    )
-  );
+  for delete using (public.is_room_member (room_id));
 
 -- Create room (caller becomes first member)
 create or replace function public.create_room ()
@@ -164,4 +157,15 @@ grant execute on function public.join_room (text) to authenticated;
 revoke insert on table public.room_members from authenticated;
 revoke insert on table public.room_members from anon;
 
-alter publication supabase_realtime add table public.tasks;
+do $$
+begin
+  if not exists (
+    select 1
+    from pg_catalog.pg_publication_tables
+    where pubname = 'supabase_realtime'
+      and schemaname = 'public'
+      and tablename = 'tasks'
+  ) then
+    alter publication supabase_realtime add table public.tasks;
+  end if;
+end $$;
