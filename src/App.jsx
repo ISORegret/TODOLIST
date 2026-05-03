@@ -64,13 +64,32 @@ function mapRow(row) {
   }
 }
 
+/** Shown in the member list and assignee dropdown when display_name is still empty */
+function memberLabelFromRow(row) {
+  const d = (row.display_name || '').trim()
+  if (d) return d
+  const raw = (row.user_id || '').replace(/-/g, '')
+  return raw ? `Member ${raw.slice(0, 6)}` : 'Member'
+}
+
 export default function App() {
+  const [session, setSession] = useState(null)
   const [authReady, setAuthReady] = useState(false)
   const [authError, setAuthError] = useState(null)
+  const [emailIn, setEmailIn] = useState('')
+  const [passwordIn, setPasswordIn] = useState('')
+  const [accountBusy, setAccountBusy] = useState(false)
+  const [accountError, setAccountError] = useState('')
+  const [accountSuccess, setAccountSuccess] = useState('')
   const [roomId, setRoomId] = useState(() => localStorage.getItem(LS_ROOM) || '')
   const [joinCodeDisplay, setJoinCodeDisplay] = useState(
     () => localStorage.getItem(LS_JOIN) || '',
   )
+  const [settingsOpen, setSettingsOpen] = useState(false)
+  const [isRoomCreator, setIsRoomCreator] = useState(false)
+  const [customCodeDraft, setCustomCodeDraft] = useState('')
+  const [customCodeBusy, setCustomCodeBusy] = useState(false)
+  const [customCodeMsg, setCustomCodeMsg] = useState('')
   const [myName, setMyName] = useState(() => localStorage.getItem(LS_NAME) || '')
   const [nameIn, setNameIn] = useState('')
   const [joinCodeIn, setJoinCodeIn] = useState('')
@@ -79,7 +98,10 @@ export default function App() {
 
   /** True while changing name / list without leaving current room yet */
   const [setupPhase, setSetupPhase] = useState(false)
+  /** Sorted unique display labels (assign / filters) */
   const [members, setMembers] = useState([])
+  /** Full rows for UI: who is on this list */
+  const [membersDetail, setMembersDetail] = useState([])
 
   const [tasks, setTasks] = useState([])
   const [filter, setFilter] = useState('all')
@@ -197,7 +219,7 @@ export default function App() {
     setNotifPerm(perm)
   }
 
-  const ensureAnonymousSession = useCallback(async () => {
+  const continueAsGuest = useCallback(async () => {
     if (!supabase) return { ok: false, message: 'App is not connected.' }
     const { data: { session: s0 } } = await supabase.auth.getSession()
     if (s0?.user) return { ok: true }
@@ -214,33 +236,51 @@ export default function App() {
     if (!supabase) return
     const { data, error } = await supabase
       .from('room_members')
-      .select('display_name')
+      .select('user_id, display_name')
       .eq('room_id', rid)
     if (error) return
-    const names = [...new Set((data || []).map((r) => r.display_name).filter(Boolean))]
-    names.sort()
-    setMembers(names)
+    const rows = data || []
+    const detail = rows.map((r) => ({
+      userId: r.user_id,
+      name: memberLabelFromRow(r),
+    }))
+    detail.sort((a, b) => a.name.localeCompare(b.name))
+    setMembersDetail(detail)
+    setMembers([...new Set(detail.map((d) => d.name))])
   }, [])
 
   useEffect(() => {
-    if (!supabase) return
-    let cancelled = false
-    ;(async () => {
-      const r = await ensureAnonymousSession()
-      if (cancelled) return
-      if (r.ok) setAuthError(null)
-      else {
-        setAuthError(
-          r.message
-            || 'Anonymous sign-in failed. In the Supabase dashboard: Authentication → Providers → turn on Anonymous sign-ins. On your phone, allow cookies / cross-site storage for this site if the browser blocks them.',
-        )
-      }
+    if (!supabase) {
       setAuthReady(true)
-    })()
+      return
+    }
+    let cancelled = false
+
+    supabase.auth
+      .getSession()
+      .then(({ data: { session: s }, error }) => {
+        if (cancelled) return
+        if (error) setAuthError(error.message || String(error))
+        else setAuthError(null)
+        setSession(s ?? null)
+        setAuthReady(true)
+      })
+      .catch((e) => {
+        if (cancelled) return
+        setAuthError(e?.message ? String(e.message) : String(e))
+        setAuthReady(true)
+      })
+
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, s) => {
+      setSession(s ?? null)
+      setAuthError(null)
+    })
+
     return () => {
       cancelled = true
+      subscription.unsubscribe()
     }
-  }, [ensureAnonymousSession, supabase])
+  }, [supabase])
 
   const loadTasks = useCallback(async () => {
     const rid = roomIdRef.current
@@ -283,9 +323,13 @@ export default function App() {
     setRoomId('')
     setJoinCodeDisplay('')
     setMembers([])
+    setMembersDetail([])
     setTasks([])
     prevTasksRef.current = []
     setSetupPhase(false)
+    setSettingsOpen(false)
+    setIsRoomCreator(false)
+    setCustomCodeMsg('')
   }, [])
 
   useEffect(() => {
@@ -335,11 +379,31 @@ export default function App() {
       await loadMembers(ridAtStart)
       if (cancelled || roomIdRef.current !== ridAtStart) return
 
+      const { data: roomRow } = await supabase
+        .from('rooms')
+        .select('join_code, creator_user_id')
+        .eq('id', ridAtStart)
+        .maybeSingle()
+      if (!cancelled && roomIdRef.current === ridAtStart && roomRow?.join_code) {
+        setJoinCodeDisplay(roomRow.join_code)
+        localStorage.setItem(LS_JOIN, roomRow.join_code)
+      }
+      const { data: { user: roomUser } } = await supabase.auth.getUser()
+      if (!cancelled && roomIdRef.current === ridAtStart) {
+        setIsRoomCreator(
+          Boolean(
+            roomUser?.id &&
+              roomRow?.creator_user_id &&
+              roomUser.id === roomRow.creator_user_id,
+          ),
+        )
+      }
+
       await loadTasks()
       if (cancelled || roomIdRef.current !== ridAtStart) return
 
       chRef.current = supabase
-        .channel(`tasks:${ridAtStart}`)
+        .channel(`room-sync:${ridAtStart}`)
         .on(
           'postgres_changes',
           {
@@ -350,6 +414,18 @@ export default function App() {
           },
           () => {
             loadTasks()
+          },
+        )
+        .on(
+          'postgres_changes',
+          {
+            event: '*',
+            schema: 'public',
+            table: 'room_members',
+            filter: `room_id=eq.${ridAtStart}`,
+          },
+          () => {
+            loadMembers(ridAtStart)
           },
         )
         .subscribe()
@@ -363,6 +439,7 @@ export default function App() {
     }
   }, [
     authReady,
+    session?.user?.id,
     roomId,
     setupPhase,
     myName,
@@ -378,16 +455,98 @@ export default function App() {
     setNameIn(myName || '')
   }
 
+  async function handleSignIn(ev) {
+    ev?.preventDefault?.()
+    if (!supabase) return
+    const email = emailIn.trim()
+    if (!email || !passwordIn) {
+      setAccountError('Enter email and password.')
+      return
+    }
+    setAccountBusy(true)
+    setAccountError('')
+    setAccountSuccess('')
+    const { error } = await supabase.auth.signInWithPassword({ email, password: passwordIn })
+    setAccountBusy(false)
+    if (error) {
+      setAccountError(error.message || 'Could not sign in')
+      return
+    }
+    setPasswordIn('')
+  }
+
+  async function handleSignUp(ev) {
+    ev?.preventDefault?.()
+    if (!supabase) return
+    const email = emailIn.trim()
+    if (!email || passwordIn.length < 6) {
+      setAccountError('Use a valid email and a password of at least 6 characters.')
+      return
+    }
+    setAccountBusy(true)
+    setAccountError('')
+    setAccountSuccess('')
+    const { data, error } = await supabase.auth.signUp({ email, password: passwordIn })
+    setAccountBusy(false)
+    if (error) {
+      setAccountError(error.message || 'Could not sign up')
+      return
+    }
+    setPasswordIn('')
+    if (data.session) {
+      setAccountSuccess('')
+    } else {
+      setAccountSuccess(
+        'Check your email for a confirmation link (if required by your project), then sign in here.',
+      )
+    }
+  }
+
+  async function handleForgotPassword() {
+    if (!supabase) return
+    const email = emailIn.trim()
+    if (!email) {
+      setAccountError('Enter your email, then tap forgot password again.')
+      return
+    }
+    setAccountBusy(true)
+    setAccountError('')
+    setAccountSuccess('')
+    const origin = `${window.location.origin}${window.location.pathname || '/'}`
+    const { error } = await supabase.auth.resetPasswordForEmail(email, { redirectTo: origin })
+    setAccountBusy(false)
+    if (error) setAccountError(error.message || 'Could not send reset email')
+    else setAccountSuccess('If that address has an account, a reset link was sent.')
+  }
+
+  async function handleContinueGuest() {
+    setAccountBusy(true)
+    setAccountError('')
+    setAccountSuccess('')
+    const r = await continueAsGuest()
+    setAccountBusy(false)
+    if (!r.ok) {
+      setAccountError(
+        `${r.message || 'Guest sign-in failed'} Turn on Anonymous under Authentication → Providers in Supabase, or use email.`,
+      )
+    }
+  }
+
+  async function handleSignOut() {
+    if (!supabase) return
+    setSettingsOpen(false)
+    await supabase.auth.signOut()
+    leaveRoom()
+  }
+
   async function handleCreateRoom() {
     if (!nameIn.trim() || !supabase) return
     setRoomBusy(true)
     setRoomError('')
-    const auth = await ensureAnonymousSession()
-    if (!auth.ok) {
+    const { data: { session: s } } = await supabase.auth.getSession()
+    if (!s?.user) {
       setRoomBusy(false)
-      setRoomError(
-        `${auth.message || 'Not signed in'}. Enable Anonymous sign-in in Supabase, then reload this page.`,
-      )
+      setRoomError('Sign in with email (or continue as guest) before creating a list.')
       return
     }
     const { data, error } = await supabase.rpc('create_room')
@@ -429,12 +588,10 @@ export default function App() {
     if (!nameIn.trim() || !joinCodeIn.trim() || !supabase) return
     setRoomBusy(true)
     setRoomError('')
-    const auth = await ensureAnonymousSession()
-    if (!auth.ok) {
+    const { data: { session: s } } = await supabase.auth.getSession()
+    if (!s?.user) {
       setRoomBusy(false)
-      setRoomError(
-        `${auth.message || 'Not signed in'}. Enable Anonymous sign-in in Supabase, then reload this page.`,
-      )
+      setRoomError('Sign in with email (or continue as guest) before joining.')
       return
     }
     const { data: rid, error } = await supabase.rpc('join_room', {
@@ -445,11 +602,12 @@ export default function App() {
       setRoomError(error.message === 'invalid code' ? 'Invalid code' : error.message)
       return
     }
+    const joinedCode = joinCodeIn.trim().toUpperCase()
     localStorage.setItem(LS_ROOM, rid)
-    localStorage.removeItem(LS_JOIN)
+    localStorage.setItem(LS_JOIN, joinedCode)
     localStorage.setItem(LS_NAME, nameIn.trim())
     setRoomId(rid)
-    setJoinCodeDisplay('')
+    setJoinCodeDisplay(joinedCode)
     setMyName(nameIn.trim())
     myNameRef.current = nameIn.trim()
     roomIdRef.current = rid
@@ -466,6 +624,43 @@ export default function App() {
     setSetupPhase(false)
     setNameIn('')
     setJoinCodeIn('')
+  }
+
+  function openListSettings() {
+    setCustomCodeDraft(joinCodeDisplay || '')
+    setCustomCodeMsg('')
+    setSettingsOpen(true)
+  }
+
+  async function copyJoinCode() {
+    const c = joinCodeDisplay || ''
+    if (!c) return
+    try {
+      await navigator.clipboard.writeText(c)
+      showToast('Code copied')
+    } catch {
+      showToast(`Code: ${c}`)
+    }
+  }
+
+  async function handleApplyCustomCode() {
+    if (!supabase || !roomId || !customCodeDraft.trim()) return
+    setCustomCodeBusy(true)
+    setCustomCodeMsg('')
+    const { data: newCode, error } = await supabase.rpc('change_join_code', {
+      p_room_id: roomId,
+      p_new_code: customCodeDraft.trim(),
+    })
+    setCustomCodeBusy(false)
+    if (error) {
+      setCustomCodeMsg(error.message || 'Could not update code')
+      return
+    }
+    const code = typeof newCode === 'string' ? newCode : String(newCode ?? '')
+    setJoinCodeDisplay(code)
+    localStorage.setItem(LS_JOIN, code)
+    setCustomCodeMsg('Updated. Everyone must use this new code to open the list.')
+    setCustomCodeDraft(code)
   }
 
   async function addTask() {
@@ -539,9 +734,13 @@ export default function App() {
 
   const isMe = (n) => n === myName
 
-  const uniqueAssign = [...new Set([...members, myName].filter(Boolean))].sort(
-    (a, b) => a.localeCompare(b),
+  const uniqueAssign = [...new Set([...members, myName].filter(Boolean))].sort((a, b) =>
+    a.localeCompare(b),
   )
+
+  const myUserId = session?.user?.id
+  const othersLabel =
+    membersDetail.filter((m) => m.userId !== myUserId).map((m) => m.name).join(', ') || 'your group'
 
   const vis = tasks.filter((t) => {
     if (filter === 'mine') return t.by === myName
@@ -555,9 +754,6 @@ export default function App() {
   const pct = tasks.length
     ? Math.round((tasks.filter((t) => t.done).length / tasks.length) * 100)
     : 0
-
-  const othersLabel =
-    members.filter((m) => m && m !== myName).join(', ') || 'your group'
 
   if (!supabaseConfigured) {
     const invalid =
@@ -615,6 +811,96 @@ export default function App() {
     )
   }
 
+  if (!session) {
+    return (
+      <div className="app">
+        <div className="setup-screen">
+          <div>
+            <div className="header-date" style={{ textAlign: 'center', marginBottom: 10 }}>
+              {dateStr()}
+            </div>
+            <div className="setup-label">
+              Sign in to <em>keep your lists</em>
+            </div>
+          </div>
+          <p className="setup-sub">
+            Email sign-in uses the same account on your phone and computer. After signing in, pick a
+            display name and create or join a list with its code. Everyone on a list can see who else
+            is on it.
+          </p>
+          <form
+            className="setup-fields account-form"
+            onSubmit={(e) => {
+              e.preventDefault()
+              handleSignIn(e)
+            }}
+          >
+            <input
+              className="setup-input"
+              type="email"
+              autoComplete="email"
+              placeholder="Email"
+              value={emailIn}
+              onChange={(e) => {
+                setEmailIn(e.target.value)
+                setAccountError('')
+                setAccountSuccess('')
+              }}
+            />
+            <input
+              className="setup-input"
+              type="password"
+              autoComplete="current-password"
+              placeholder="Password"
+              value={passwordIn}
+              onChange={(e) => {
+                setPasswordIn(e.target.value)
+                setAccountError('')
+              }}
+            />
+            <div className="setup-row-btns">
+              <button type="submit" className="setup-go" disabled={accountBusy}>
+                Sign in
+              </button>
+              <button
+                type="button"
+                className="setup-go secondary"
+                disabled={accountBusy}
+                onClick={handleSignUp}
+              >
+                Create account
+              </button>
+            </div>
+            <button type="button" className="switch-link" disabled={accountBusy} onClick={handleForgotPassword}>
+              Forgot password?
+            </button>
+            <p className="setup-sub" style={{ marginTop: 8 }}>
+              Or continue without email (same device only; enable Anonymous in Supabase):
+            </p>
+            <button
+              type="button"
+              className="setup-go secondary"
+              disabled={accountBusy}
+              onClick={handleContinueGuest}
+            >
+              Continue as guest
+            </button>
+            {accountError && (
+              <p className="setup-sub" style={{ color: '#c0392b', marginTop: 8 }}>
+                {accountError}
+              </p>
+            )}
+            {accountSuccess && (
+              <p className="setup-sub" style={{ color: '#8CB4D4', marginTop: 8 }}>
+                {accountSuccess}
+              </p>
+            )}
+          </form>
+        </div>
+      </div>
+    )
+  }
+
   if (!roomId || setupPhase) {
     return (
       <div className="app">
@@ -628,8 +914,9 @@ export default function App() {
             </div>
           </div>
           <p className="setup-sub">
-            Sign in is automatic. Create a list and share the 6-letter code, or join someone
-            else&apos;s. Turn on notifications for alerts when others add or complete tasks.
+            You&apos;re signed in. Choose a display name everyone on the list will see. Create a list
+            and share the code, or join someone else&apos;s. Turn on notifications for alerts when
+            others add or complete tasks.
           </p>
           <div className="setup-fields">
             <input
@@ -706,6 +993,9 @@ export default function App() {
                 <div className="who-dot">{initLetter(myName)}</div>
                 <span className="who-name">{myName}</span>
               </div>
+              <button type="button" className="settings-btn" onClick={openListSettings}>
+                List info
+              </button>
               <button
                 type="button"
                 className="switch-link"
@@ -716,14 +1006,42 @@ export default function App() {
               >
                 switch list / name
               </button>
+              <button type="button" className="switch-link" onClick={handleSignOut}>
+                sign out
+              </button>
             </div>
           </div>
         </div>
 
-        {joinCodeDisplay && (
+        {joinCodeDisplay ? (
           <div className="room-banner">
             Share code: <strong>{joinCodeDisplay}</strong>
-            <span className="hint">Others enter this under &quot;Join with code&quot; with their name.</span>
+            <span className="hint">
+              Tap <strong>List info</strong> above to copy or (if you created this list) change the code. Others join
+              with the same code under &quot;Join with code&quot;.
+            </span>
+          </div>
+        ) : (
+          <div className="room-banner">
+            <span className="hint">Loading share code… If it stays blank, open List info after a moment.</span>
+          </div>
+        )}
+
+        {membersDetail.length > 0 && (
+          <div className="members-bar" aria-label="People on this list">
+            <span className="members-bar-label">On this list</span>
+            <div className="members-bar-chips">
+              {membersDetail.map((m) => (
+                <span
+                  key={m.userId}
+                  className={`member-chip${m.userId === myUserId ? ' member-chip-me' : ''}`}
+                >
+                  <span className="member-chip-dot">{initLetter(m.name)}</span>
+                  {m.name}
+                  {m.userId === myUserId ? ' (you)' : ''}
+                </span>
+              ))}
+            </div>
           </div>
         )}
 
@@ -896,6 +1214,80 @@ export default function App() {
           </button>
         </p>
       </div>
+
+      {settingsOpen && (
+        <div className="list-modal-root" role="dialog" aria-modal="true" aria-label="List information">
+          <button
+            type="button"
+            className="list-modal-backdrop"
+            aria-label="Close"
+            onClick={() => setSettingsOpen(false)}
+          />
+          <div className="list-modal-panel">
+            <div className="list-modal-header">
+              <h2 className="list-modal-title">This list</h2>
+              <button
+                type="button"
+                className="list-modal-close"
+                aria-label="Close"
+                onClick={() => setSettingsOpen(false)}
+              >
+                ×
+              </button>
+            </div>
+            <div className="list-modal-body">
+              <p className="list-modal-label">Join code</p>
+              <div className="list-modal-code-row">
+                <code className="list-modal-code">{joinCodeDisplay || '—'}</code>
+                <button
+                  type="button"
+                  className="setup-go secondary"
+                  onClick={copyJoinCode}
+                  disabled={!joinCodeDisplay}
+                >
+                  Copy
+                </button>
+              </div>
+              <p className="list-modal-hint">
+                Share this code so others can join from the home screen under &quot;Join with code&quot;.
+              </p>
+
+              {isRoomCreator ? (
+                <>
+                  <hr className="list-modal-divider" />
+                  <p className="list-modal-label">Custom join code (you created this list)</p>
+                  <p className="list-modal-hint">
+                    4–8 letters or numbers. Anyone already in the list should use the new code after you save.
+                  </p>
+                  <div className="list-modal-code-row list-modal-code-row--stack">
+                    <input
+                      className="setup-input"
+                      value={customCodeDraft}
+                      onChange={(e) => setCustomCodeDraft(e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, ''))}
+                      maxLength={8}
+                      placeholder="E.g. FAMILY1"
+                    />
+                    <button
+                      type="button"
+                      className="setup-go"
+                      disabled={customCodeBusy || customCodeDraft.length < 4}
+                      onClick={handleApplyCustomCode}
+                    >
+                      Save new code
+                    </button>
+                  </div>
+                  {customCodeMsg && <p className="list-modal-msg">{customCodeMsg}</p>}
+                </>
+              ) : (
+                <p className="list-modal-hint" style={{ marginTop: 14 }}>
+                  Only the person who tapped &quot;New list&quot; can change the code. Lists created before the
+                  database update may not show this option until you run the latest SQL migration in Supabase.
+                </p>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
     </>
   )
 }
