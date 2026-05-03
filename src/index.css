@@ -1,0 +1,5 @@
+/* App styles live in duo-todo.css */
+html, body, #root {
+  margin: 0;
+  min-height: 100%;
+}
