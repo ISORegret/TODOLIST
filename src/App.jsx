@@ -167,6 +167,9 @@ export default function App() {
   const [leaveListBusy, setLeaveListBusy] = useState(false)
   const [removeMemberBusyId, setRemoveMemberBusyId] = useState('')
   const [removeMemberMsg, setRemoveMemberMsg] = useState('')
+  const [transferCreatorUserId, setTransferCreatorUserId] = useState('')
+  const [transferCreatorBusy, setTransferCreatorBusy] = useState(false)
+  const [transferCreatorMsg, setTransferCreatorMsg] = useState('')
   const [myName, setMyName] = useState(() => localStorage.getItem(LS_NAME) || '')
   const [nameIn, setNameIn] = useState('')
   const [joinCodeIn, setJoinCodeIn] = useState('')
@@ -707,7 +710,10 @@ export default function App() {
     setCustomCodeMsg('')
     setListTitleMsg('')
     setRemoveMemberMsg('')
+    setTransferCreatorMsg('')
+    setTransferCreatorUserId('')
     setRemoveMemberBusyId('')
+    setTransferCreatorBusy(false)
     setPingingUserId('')
     pingCooldownRef.current = new Map()
     seenPingIdsRef.current = new Set()
@@ -1190,6 +1196,10 @@ export default function App() {
     setListTitleDraft(roomTitle)
     setListTitleMsg('')
     setRemoveMemberMsg('')
+    setTransferCreatorMsg('')
+    setTransferCreatorUserId(
+      membersDetail.find((m) => m.userId !== creatorUserId)?.userId || '',
+    )
     setNotifActionMsg('')
     setSettingsOpen(true)
   }
@@ -1255,6 +1265,37 @@ export default function App() {
     await loadMembers(roomId)
     setRemoveMemberMsg(`Removed ${targetName}.`)
     showToast(`Removed ${targetName} from this list`)
+  }
+
+  async function handleTransferCreator() {
+    if (!supabase || !roomId || !transferCreatorUserId) return
+    setTransferCreatorMsg('')
+    setTransferCreatorBusy(true)
+    const { data: nextCreatorId, error } = await supabase.rpc('transfer_room_creator', {
+      p_room_id: roomId,
+      p_new_creator_user_id: transferCreatorUserId,
+    })
+    setTransferCreatorBusy(false)
+    if (error) {
+      console.error('transfer creator', error)
+      const blocked =
+        error.code === '42501' ||
+        /row-level security|RLS|permission denied|only the list creator/i.test(error.message || '')
+      const msg = blocked
+        ? 'Could not transfer creator controls — only the current creator can do this.'
+        : `Could not transfer creator controls: ${error.message || 'Unknown error'}`
+      setTransferCreatorMsg(msg)
+      showToast(msg)
+      return
+    }
+    const nextId = typeof nextCreatorId === 'string' ? nextCreatorId : transferCreatorUserId
+    const nextName =
+      membersDetail.find((m) => m.userId === nextId)?.name || memberLabelFromUserId(nextId)
+    const amCreator = Boolean(session?.user?.id && session.user.id === nextId)
+    setCreatorUserId(nextId)
+    setIsRoomCreator(amCreator)
+    setTransferCreatorMsg(`Creator controls moved to ${nextName}.`)
+    showToast(`Creator controls moved to ${nextName}`)
   }
 
   async function sendPing(toUserId, toName) {
@@ -1503,6 +1544,7 @@ export default function App() {
 
   const myUserId = session?.user?.id
   const removableMembers = membersDetail.filter((m) => m.userId !== myUserId)
+  const transferableMembers = membersDetail.filter((m) => m.userId !== creatorUserId)
   const creatorName = creatorUserId
     ? creatorUserId === myUserId
       ? `${myName || 'You'} (you)`
@@ -2288,6 +2330,41 @@ export default function App() {
 
               {isRoomCreator ? (
                 <>
+                  <hr className="list-modal-divider" />
+                  <p className="list-modal-label">Transfer creator controls</p>
+                  <p className="list-modal-hint">
+                    Move creator controls to another member before removing old users/devices.
+                  </p>
+                  {transferableMembers.length === 0 ? (
+                    <p className="list-modal-hint">No other members available for transfer.</p>
+                  ) : (
+                    <div className="list-modal-code-row list-modal-code-row--stack">
+                      <select
+                        className="setup-input"
+                        value={transferCreatorUserId}
+                        onChange={(e) => {
+                          setTransferCreatorUserId(e.target.value)
+                          setTransferCreatorMsg('')
+                        }}
+                      >
+                        {transferableMembers.map((member) => (
+                          <option key={member.userId} value={member.userId}>
+                            {member.name}
+                          </option>
+                        ))}
+                      </select>
+                      <button
+                        type="button"
+                        className="setup-go secondary"
+                        disabled={transferCreatorBusy || !transferCreatorUserId}
+                        onClick={handleTransferCreator}
+                      >
+                        {transferCreatorBusy ? 'Transferring…' : 'Transfer creator'}
+                      </button>
+                    </div>
+                  )}
+                  {transferCreatorMsg && <p className="list-modal-msg">{transferCreatorMsg}</p>}
+
                   <hr className="list-modal-divider" />
                   <p className="list-modal-label">Members (creator controls)</p>
                   <p className="list-modal-hint">Remove stale members/devices from this list.</p>
