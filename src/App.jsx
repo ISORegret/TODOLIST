@@ -10,6 +10,16 @@ import './duo-todo.css'
 const LS_ROOM = 'duo-room-id'
 const LS_JOIN = 'duo-join-code'
 const LS_NAME = 'duo-my-name'
+const LS_FILTER_PREF = 'duo-filter-pref'
+const LS_ASSIGN_PREF = 'duo-assign-pref'
+const UNDO_TOAST_MS = 5200
+const FILTER_OPTIONS = [
+  ['all', 'All'],
+  ['mine', 'Mine'],
+  ['forme', 'For me'],
+  ['done', 'Done'],
+]
+const VALID_FILTERS = new Set(FILTER_OPTIONS.map(([value]) => value))
 
 const origTitle = "Today's list"
 
@@ -137,6 +147,7 @@ export default function App() {
   const [addIn, setAddIn] = useState('')
   const [assignTo, setAssignTo] = useState([])
   const [toasts, setToasts] = useState([])
+  const [bulkBusy, setBulkBusy] = useState(false)
   const [notifPerm, setNotifPerm] = useState(() =>
     typeof window !== 'undefined' && 'Notification' in window
       ? Notification.permission
@@ -153,6 +164,7 @@ export default function App() {
   const roomIdRef = useRef(roomId)
   const addRef = useRef(null)
   const setupDoneRef = useRef(false)
+  const prefsScopeRef = useRef('')
 
   useEffect(() => {
     myNameRef.current = myName
@@ -160,6 +172,44 @@ export default function App() {
   useEffect(() => {
     roomIdRef.current = roomId
   }, [roomId])
+
+  const prefsScope =
+    roomId && session?.user?.id ? `${session.user.id}:${roomId}` : ''
+
+  useEffect(() => {
+    if (typeof localStorage === 'undefined') return
+    if (!prefsScope) return
+    prefsScopeRef.current = prefsScope
+    const savedFilter = localStorage.getItem(`${LS_FILTER_PREF}:${prefsScope}`) || ''
+    const nextFilter = VALID_FILTERS.has(savedFilter) ? savedFilter : 'all'
+    setFilter(nextFilter)
+    const savedAssignRaw = localStorage.getItem(`${LS_ASSIGN_PREF}:${prefsScope}`) || ''
+    if (!savedAssignRaw) {
+      setAssignTo([])
+      return
+    }
+    try {
+      const parsed = JSON.parse(savedAssignRaw)
+      setAssignTo(normalizeAssignees(parsed))
+    } catch {
+      setAssignTo([])
+    }
+  }, [prefsScope])
+
+  useEffect(() => {
+    if (typeof localStorage === 'undefined') return
+    if (!prefsScope || prefsScopeRef.current !== prefsScope) return
+    localStorage.setItem(`${LS_FILTER_PREF}:${prefsScope}`, filter)
+  }, [filter, prefsScope])
+
+  useEffect(() => {
+    if (typeof localStorage === 'undefined') return
+    if (!prefsScope || prefsScopeRef.current !== prefsScope) return
+    localStorage.setItem(
+      `${LS_ASSIGN_PREF}:${prefsScope}`,
+      JSON.stringify(normalizeAssignees(assignTo)),
+    )
+  }, [assignTo, prefsScope])
 
   useEffect(() => {
     if (unread > 0) document.title = `(${unread}) ${origTitle}`
@@ -172,11 +222,24 @@ export default function App() {
     return () => window.removeEventListener('focus', onFocus)
   }, [])
 
-  const showToast = useCallback((msg) => {
-    const id = genToastId()
-    setToasts((t) => [...t, { id, msg }])
-    setTimeout(() => setToasts((t) => t.filter((x) => x.id !== id)), 3200)
+  const dismissToast = useCallback((id) => {
+    setToasts((t) => t.filter((x) => x.id !== id))
   }, [])
+
+  const showToast = useCallback((msg, options = {}) => {
+    const id = genToastId()
+    const timeoutMs = Number.isFinite(options.timeoutMs) ? Number(options.timeoutMs) : 3200
+    setToasts((t) => [
+      ...t,
+      {
+        id,
+        msg,
+        actionLabel: options.actionLabel || '',
+        onAction: typeof options.onAction === 'function' ? options.onAction : null,
+      },
+    ])
+    setTimeout(() => dismissToast(id), timeoutMs)
+  }, [dismissToast])
 
   const sendBrowserNotif = useCallback((title, body) => {
     if ('Notification' in window && Notification.permission === 'granted') {
@@ -897,25 +960,39 @@ export default function App() {
       return
     }
     setAddIn('')
-    setAssignTo([])
     addRef.current?.focus()
     await loadTasks()
   }
 
-  async function toggleDone(id) {
-    if (!supabase) return
-    const t = tasks.find((x) => x.id === id)
-    if (!t) return
-    const nextDone = !t.done
+  async function setTaskDone(id, nextDone, doneBy = null) {
+    if (!supabase) return false
     const payload = nextDone
-      ? { done: true, done_by: myName, updated_at: new Date().toISOString() }
+      ? { done: true, done_by: doneBy || myName, updated_at: new Date().toISOString() }
       : { done: false, done_by: null, updated_at: new Date().toISOString() }
     const { error } = await supabase.from('tasks').update(payload).eq('id', id)
     if (error) {
       showToast('Could not update task')
-      return
+      return false
     }
     await loadTasks()
+    return true
+  }
+
+  async function toggleDone(id) {
+    const t = tasks.find((x) => x.id === id)
+    if (!t) return
+    const nextDone = !t.done
+    const ok = await setTaskDone(id, nextDone, myName)
+    if (!ok) return
+    showToast(nextDone ? 'Marked done' : 'Marked active', {
+      actionLabel: 'Undo',
+      timeoutMs: UNDO_TOAST_MS,
+      onAction: async () => {
+        const restoredDoneBy = t.done ? t.doneBy || myName : null
+        const reverted = await setTaskDone(id, t.done, restoredDoneBy)
+        if (!reverted) showToast('Could not undo')
+      },
+    })
   }
 
   async function updateAssigned(id, values) {
@@ -942,12 +1019,84 @@ export default function App() {
 
   async function delTask(id) {
     if (!supabase) return
+    const t = tasks.find((x) => x.id === id)
     const { error } = await supabase.from('tasks').delete().eq('id', id)
     if (error) {
       showToast('Could not delete')
       return
     }
     await loadTasks()
+    if (!t || !roomId) return
+    showToast('Task deleted', {
+      actionLabel: 'Undo',
+      timeoutMs: UNDO_TOAST_MS,
+      onAction: async () => {
+        const restoreRow = {
+          room_id: roomId,
+          text: t.text,
+          created_by: t.by,
+          assigned_to: encodeAssignees(t.assignedTo),
+          done: t.done,
+          done_by: t.doneBy || null,
+        }
+        const { error: restoreErr } = await supabase.from('tasks').insert(restoreRow)
+        if (restoreErr) {
+          showToast('Could not undo delete')
+          return
+        }
+        await loadTasks()
+      },
+    })
+  }
+
+  async function markAllDone() {
+    if (!supabase || !roomId || bulkBusy) return
+    setBulkBusy(true)
+    const { data, error } = await supabase
+      .from('tasks')
+      .update({
+        done: true,
+        done_by: myName,
+        updated_at: new Date().toISOString(),
+      })
+      .eq('room_id', roomId)
+      .eq('done', false)
+      .select('id')
+    setBulkBusy(false)
+    if (error) {
+      showToast('Could not mark all done')
+      return
+    }
+    await loadTasks()
+    const count = Array.isArray(data) ? data.length : 0
+    showToast(
+      count > 0
+        ? `Marked ${count} task${count === 1 ? '' : 's'} done`
+        : 'Everything is already done',
+    )
+  }
+
+  async function clearDoneTasks() {
+    if (!supabase || !roomId || bulkBusy) return
+    setBulkBusy(true)
+    const { data, error } = await supabase
+      .from('tasks')
+      .delete()
+      .eq('room_id', roomId)
+      .eq('done', true)
+      .select('id')
+    setBulkBusy(false)
+    if (error) {
+      showToast('Could not clear done tasks')
+      return
+    }
+    await loadTasks()
+    const count = Array.isArray(data) ? data.length : 0
+    showToast(
+      count > 0
+        ? `Cleared ${count} done task${count === 1 ? '' : 's'}`
+        : 'No done tasks to clear',
+    )
   }
 
   const isMe = (n) => n === myName
@@ -969,6 +1118,8 @@ export default function App() {
 
   const active = filter === 'done' ? [] : vis
   const done = filter === 'done' ? vis : []
+  const hasDoneTasks = tasks.some((t) => t.done)
+  const hasOpenTasks = tasks.some((t) => !t.done)
   const pct = tasks.length
     ? Math.round((tasks.filter((t) => t.done).length / tasks.length) * 100)
     : 0
@@ -1257,7 +1408,19 @@ export default function App() {
       <div className="toast-wrap">
         {toasts.map((t) => (
           <div key={t.id} className="toast">
-            {t.msg}
+            <span>{t.msg}</span>
+            {t.actionLabel && t.onAction && (
+              <button
+                type="button"
+                className="toast-action"
+                onClick={async () => {
+                  dismissToast(t.id)
+                  await t.onAction()
+                }}
+              >
+                {t.actionLabel}
+              </button>
+            )}
           </div>
         ))}
       </div>
@@ -1382,12 +1545,7 @@ export default function App() {
         </div>
 
         <div className="filters">
-          {[
-            ['all', 'All'],
-            ['mine', 'Mine'],
-            ['forme', 'For me'],
-            ['done', 'Done'],
-          ].map(([v, l]) => (
+          {FILTER_OPTIONS.map(([v, l]) => (
             <button
               key={v}
               type="button"
@@ -1397,6 +1555,24 @@ export default function App() {
               {l}
             </button>
           ))}
+        </div>
+        <div className="list-actions">
+          <button
+            type="button"
+            className="list-action-btn"
+            disabled={bulkBusy || !hasOpenTasks}
+            onClick={markAllDone}
+          >
+            Mark all done
+          </button>
+          <button
+            type="button"
+            className="list-action-btn danger"
+            disabled={bulkBusy || !hasDoneTasks}
+            onClick={clearDoneTasks}
+          >
+            Clear done
+          </button>
         </div>
 
         <div className="tasks">
@@ -1484,42 +1660,44 @@ export default function App() {
           )}
         </div>
 
-        <div className="add-row">
-          <input
-            ref={addRef}
-            className="add-input"
-            value={addIn}
-            onChange={(e) => setAddIn(e.target.value)}
-            onKeyDown={(e) => e.key === 'Enter' && addTask()}
-            placeholder="Add a task…"
-            maxLength={200}
-          />
-          <div className="add-assign-picker" aria-label="Assign new task">
-            <button
-              type="button"
-              className={`add-assign-chip${assignTo.length === 0 ? ' active' : ''}`}
-              onClick={() => setAssignTo([])}
-            >
-              Anyone
-            </button>
-            {uniqueAssign.map((m) => (
+        <div className="sticky-add-shell">
+          <div className="add-row">
+            <input
+              ref={addRef}
+              className="add-input"
+              value={addIn}
+              onChange={(e) => setAddIn(e.target.value)}
+              onKeyDown={(e) => e.key === 'Enter' && addTask()}
+              placeholder="Add a task…"
+              maxLength={200}
+            />
+            <div className="add-assign-picker" aria-label="Assign new task">
               <button
-                key={m}
                 type="button"
-                className={`add-assign-chip${assignTo.includes(m) ? ' active' : ''}`}
-                onClick={() =>
-                  setAssignTo((prev) =>
-                    prev.includes(m) ? prev.filter((x) => x !== m) : [...prev, m],
-                  )
-                }
+                className={`add-assign-chip${assignTo.length === 0 ? ' active' : ''}`}
+                onClick={() => setAssignTo([])}
               >
-                {m}
+                Anyone
               </button>
-            ))}
+              {uniqueAssign.map((m) => (
+                <button
+                  key={m}
+                  type="button"
+                  className={`add-assign-chip${assignTo.includes(m) ? ' active' : ''}`}
+                  onClick={() =>
+                    setAssignTo((prev) =>
+                      prev.includes(m) ? prev.filter((x) => x !== m) : [...prev, m],
+                    )
+                  }
+                >
+                  {m}
+                </button>
+              ))}
+            </div>
+            <button type="button" className="add-btn" onClick={addTask}>
+              +
+            </button>
           </div>
-          <button type="button" className="add-btn" onClick={addTask}>
-            +
-          </button>
         </div>
 
         <div className="footer-leave-wrap">
