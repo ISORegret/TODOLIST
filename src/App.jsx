@@ -1721,7 +1721,7 @@ export default function App() {
                 <span className="who-name">{myName}</span>
               </div>
               <button type="button" className="settings-btn" onClick={openListSettings}>
-                List info
+                List settings
               </button>
               <button
                 type="button"
@@ -1764,13 +1764,13 @@ export default function App() {
               </>
             )}
             <span className="hint">
-              Tap <strong>List info</strong> to set a list name, copy the code, or change the code (creator). Others
+              Tap <strong>List settings</strong> to set a list name, copy the code, or change the code (creator). Others
               join under &quot;Join with code&quot; on the home screen.
             </span>
           </div>
         ) : (
           <div className="room-banner">
-            <span className="hint">Loading share code… If it stays blank, open List info after a moment.</span>
+            <span className="hint">Loading share code… If it stays blank, open List settings after a moment.</span>
           </div>
         )}
 
@@ -2001,7 +2001,7 @@ export default function App() {
       </div>
 
       {settingsOpen && (
-        <div className="list-modal-root" role="dialog" aria-modal="true" aria-label="List information">
+        <div className="list-modal-root" role="dialog" aria-modal="true" aria-label="List settings">
           <button
             type="button"
             className="list-modal-backdrop"
