@@ -965,7 +965,22 @@ export default function App() {
     })
     setPingingUserId('')
     if (error) {
-      showToast('Could not send ping')
+      console.error('sendPing', error)
+      const msg = error.message || ''
+      const missingMigration =
+        error.code === '42P01' ||
+        /member_pings/i.test(msg) &&
+          (/does not exist|schema cache|not found|relation/i.test(msg))
+      const rls =
+        error.code === '42501' ||
+        /row-level security|RLS|permission denied|not a member/i.test(msg)
+      if (missingMigration) {
+        showToast('Ping setup missing — run the latest Supabase migration for member pings.')
+      } else if (rls) {
+        showToast('Could not send ping — rejoin this list with your code, then retry.')
+      } else {
+        showToast(`Could not send ping: ${msg || error.code || 'unknown error'}`)
+      }
       return
     }
     pingCooldownRef.current.set(toUserId, now)
