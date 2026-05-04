@@ -115,6 +115,9 @@ export default function App() {
   )
   const [unread, setUnread] = useState(0)
   const [newIds, setNewIds] = useState(() => new Set())
+  /** Rooms the current user belongs to (home screen) */
+  const [myLists, setMyLists] = useState([])
+  const [myListsLoading, setMyListsLoading] = useState(false)
 
   const prevTasksRef = useRef([])
   const myNameRef = useRef(myName)
@@ -248,6 +251,54 @@ export default function App() {
     setMembersDetail(detail)
     setMembers([...new Set(detail.map((d) => d.name))])
   }, [])
+
+  const loadMyLists = useCallback(async () => {
+    if (!supabase) return
+    const { data: { user } } = await supabase.auth.getUser()
+    if (!user) {
+      setMyLists([])
+      return
+    }
+    setMyListsLoading(true)
+    const { data, error } = await supabase
+      .from('room_members')
+      .select('room_id, display_name, rooms(join_code)')
+      .eq('user_id', user.id)
+    setMyListsLoading(false)
+    if (error) {
+      console.error('loadMyLists', error)
+      return
+    }
+    const rows = (data || [])
+      .map((r) => {
+        const rel = r.rooms
+        const joinCode =
+          rel && typeof rel === 'object' && !Array.isArray(rel)
+            ? rel.join_code
+            : Array.isArray(rel) && rel[0]
+              ? rel[0].join_code
+              : ''
+        return {
+          roomId: r.room_id,
+          joinCode: joinCode || '',
+          displayName: (r.display_name || '').trim(),
+        }
+      })
+      .filter((x) => x.roomId && x.joinCode)
+    rows.sort((a, b) => a.joinCode.localeCompare(b.joinCode))
+    setMyLists(rows)
+  }, [supabase])
+
+  useEffect(() => {
+    if (!authReady || !supabaseConfigured || !supabase) return
+    if (!session) {
+      setMyLists([])
+      setMyListsLoading(false)
+      return
+    }
+    if (roomId && !setupPhase) return
+    loadMyLists()
+  }, [authReady, session?.user?.id, roomId, setupPhase, loadMyLists, supabase, supabaseConfigured])
 
   useEffect(() => {
     if (!supabase) {
@@ -535,8 +586,46 @@ export default function App() {
   async function handleSignOut() {
     if (!supabase) return
     setSettingsOpen(false)
+    setMyLists([])
     await supabase.auth.signOut()
     leaveRoom()
+  }
+
+  async function openExistingList(entry) {
+    if (!supabase) return
+    setRoomError('')
+    const resolved =
+      entry.displayName ||
+      nameIn.trim() ||
+      (typeof localStorage !== 'undefined' ? localStorage.getItem(LS_NAME) : '') ||
+      ''
+    if (!resolved.trim()) {
+      setRoomError('Enter your display name in the box below, then open the list again.')
+      return
+    }
+    const name = resolved.trim()
+    const { data: { user } } = await supabase.auth.getUser()
+    if (!user) return
+    const rid = entry.roomId
+    const code = entry.joinCode
+    localStorage.setItem(LS_ROOM, rid)
+    localStorage.setItem(LS_JOIN, code)
+    localStorage.setItem(LS_NAME, name)
+    setRoomId(rid)
+    setJoinCodeDisplay(code)
+    setMyName(name)
+    myNameRef.current = name
+    roomIdRef.current = rid
+    setupDoneRef.current = true
+    setSetupPhase(false)
+    setJoinCodeIn('')
+    await supabase
+      .from('room_members')
+      .update({ display_name: name })
+      .eq('room_id', rid)
+      .eq('user_id', user.id)
+    prevTasksRef.current = []
+    setTasks([])
   }
 
   async function handleCreateRoom() {
@@ -811,159 +900,212 @@ export default function App() {
     )
   }
 
-  if (!session) {
-    return (
-      <div className="app">
-        <div className="setup-screen">
-          <div>
-            <div className="header-date" style={{ textAlign: 'center', marginBottom: 10 }}>
-              {dateStr()}
-            </div>
-            <div className="setup-label">
-              Sign in to <em>keep your lists</em>
-            </div>
-          </div>
-          <p className="setup-sub">
-            Email sign-in uses the same account on your phone and computer. After signing in, pick a
-            display name and create or join a list with its code. Everyone on a list can see who else
-            is on it.
-          </p>
-          <form
-            className="setup-fields account-form"
-            onSubmit={(e) => {
-              e.preventDefault()
-              handleSignIn(e)
-            }}
-          >
-            <input
-              className="setup-input"
-              type="email"
-              autoComplete="email"
-              placeholder="Email"
-              value={emailIn}
-              onChange={(e) => {
-                setEmailIn(e.target.value)
-                setAccountError('')
-                setAccountSuccess('')
-              }}
-            />
-            <input
-              className="setup-input"
-              type="password"
-              autoComplete="current-password"
-              placeholder="Password"
-              value={passwordIn}
-              onChange={(e) => {
-                setPasswordIn(e.target.value)
-                setAccountError('')
-              }}
-            />
-            <div className="setup-row-btns">
-              <button type="submit" className="setup-go" disabled={accountBusy}>
-                Sign in
-              </button>
-              <button
-                type="button"
-                className="setup-go secondary"
-                disabled={accountBusy}
-                onClick={handleSignUp}
-              >
-                Create account
-              </button>
-            </div>
-            <button type="button" className="switch-link" disabled={accountBusy} onClick={handleForgotPassword}>
-              Forgot password?
-            </button>
-            <p className="setup-sub" style={{ marginTop: 8 }}>
-              Or continue without email (same device only; enable Anonymous in Supabase):
-            </p>
-            <button
-              type="button"
-              className="setup-go secondary"
-              disabled={accountBusy}
-              onClick={handleContinueGuest}
-            >
-              Continue as guest
-            </button>
-            {accountError && (
-              <p className="setup-sub" style={{ color: '#c0392b', marginTop: 8 }}>
-                {accountError}
-              </p>
-            )}
-            {accountSuccess && (
-              <p className="setup-sub" style={{ color: '#8CB4D4', marginTop: 8 }}>
-                {accountSuccess}
-              </p>
-            )}
-          </form>
-        </div>
-      </div>
-    )
-  }
+  if (!session || !roomId || setupPhase) {
+    const sessionEmail = session?.user?.email
+    const isGuestSession = Boolean(session?.user && !sessionEmail)
 
-  if (!roomId || setupPhase) {
     return (
       <div className="app">
-        <div className="setup-screen">
+        <div className="setup-screen home-screen">
           <div>
             <div className="header-date" style={{ textAlign: 'center', marginBottom: 10 }}>
               {dateStr()}
             </div>
             <div className="setup-label">
-              Shared list for <em>every device</em>
+              {!session ? (
+                <>
+                  Sign in <em>first</em>
+                </>
+              ) : (
+                <>
+                  Your <em>lists</em>
+                </>
+              )}
             </div>
           </div>
-          <p className="setup-sub">
-            You&apos;re signed in. Choose a display name everyone on the list will see. Create a list
-            and share the code, or join someone else&apos;s. Turn on notifications for alerts when
-            others add or complete tasks.
-          </p>
-          <div className="setup-fields">
-            <input
-              className="setup-input"
-              placeholder="Your display name"
-              value={nameIn}
-              onChange={(e) => setNameIn(e.target.value)}
-              maxLength={24}
-              autoFocus
-            />
-            <div className="setup-row-btns">
-              <button
-                type="button"
-                className="setup-go"
-                disabled={roomBusy || !nameIn.trim()}
-                onClick={handleCreateRoom}
-              >
-                New list
-              </button>
-            </div>
-            <input
-              className="setup-input"
-              placeholder="Join code (6 letters)"
-              value={joinCodeIn}
-              onChange={(e) => setJoinCodeIn(e.target.value.toUpperCase())}
-              onKeyDown={(e) => e.key === 'Enter' && handleJoinRoom()}
-              maxLength={8}
-            />
-            <button
-              type="button"
-              className="setup-go secondary"
-              disabled={roomBusy || !nameIn.trim() || !joinCodeIn.trim()}
-              onClick={handleJoinRoom}
-            >
-              Join with code
-            </button>
-            {roomId && (
-              <button type="button" className="switch-link" onClick={cancelSetup}>
-                ← Back to list
-              </button>
-            )}
-            {roomError && (
-              <p className="setup-sub" style={{ color: '#c0392b', marginTop: 4 }}>
-                {roomError}
+
+          {!session ? (
+            <>
+              <p className="setup-sub">
+                Use the same email on every device so you show up once on each list. After you sign in,
+                pick a display name, then create or join a list.
               </p>
-            )}
-          </div>
+              <form
+                className="setup-fields account-form"
+                onSubmit={(e) => {
+                  e.preventDefault()
+                  handleSignIn(e)
+                }}
+              >
+                <input
+                  className="setup-input"
+                  type="email"
+                  autoComplete="email"
+                  placeholder="Email"
+                  value={emailIn}
+                  autoFocus
+                  onChange={(e) => {
+                    setEmailIn(e.target.value)
+                    setAccountError('')
+                    setAccountSuccess('')
+                  }}
+                />
+                <input
+                  className="setup-input"
+                  type="password"
+                  autoComplete="current-password"
+                  placeholder="Password"
+                  value={passwordIn}
+                  onChange={(e) => {
+                    setPasswordIn(e.target.value)
+                    setAccountError('')
+                  }}
+                />
+                <div className="setup-row-btns">
+                  <button type="submit" className="setup-go" disabled={accountBusy}>
+                    Sign in
+                  </button>
+                  <button
+                    type="button"
+                    className="setup-go secondary"
+                    disabled={accountBusy}
+                    onClick={handleSignUp}
+                  >
+                    Create account
+                  </button>
+                </div>
+                <button
+                  type="button"
+                  className="switch-link"
+                  disabled={accountBusy}
+                  onClick={handleForgotPassword}
+                >
+                  Forgot password?
+                </button>
+                <p className="setup-sub" style={{ marginTop: 8 }}>
+                  Or continue without email (same device only; enable Anonymous in Supabase):
+                </p>
+                <button
+                  type="button"
+                  className="setup-go secondary"
+                  disabled={accountBusy}
+                  onClick={handleContinueGuest}
+                >
+                  Continue as guest
+                </button>
+                {accountError && (
+                  <p className="setup-sub" style={{ color: '#c0392b', marginTop: 8 }}>
+                    {accountError}
+                  </p>
+                )}
+                {accountSuccess && (
+                  <p className="setup-sub" style={{ color: '#8CB4D4', marginTop: 8 }}>
+                    {accountSuccess}
+                  </p>
+                )}
+              </form>
+            </>
+          ) : (
+            <>
+              <div className="home-session-bar">
+                <p className="home-session-email">
+                  Signed in as <strong>{sessionEmail || 'Guest (this device only)'}</strong>
+                </p>
+                <button
+                  type="button"
+                  className="setup-go secondary home-signout-btn"
+                  onClick={handleSignOut}
+                >
+                  Sign out
+                </button>
+              </div>
+
+              <div className="home-lists-section">
+                <p className="home-lists-heading">Lists you&apos;re on</p>
+                {myListsLoading && (
+                  <p className="setup-sub home-lists-status">Loading your lists…</p>
+                )}
+                {!myListsLoading && myLists.length === 0 && (
+                  <p className="setup-sub home-lists-status">
+                    {isGuestSession
+                      ? 'Guest mode keeps lists on this browser only. Use email sign-in to see the same lists on every device.'
+                      : 'No lists yet — create one or join with a code below.'}
+                  </p>
+                )}
+                {!myListsLoading && myLists.length > 0 && (
+                  <ul className="home-lists-ul" aria-label="Lists you belong to">
+                    {myLists.map((row) => (
+                      <li key={row.roomId}>
+                        <button
+                          type="button"
+                          className="home-list-open"
+                          onClick={() => openExistingList(row)}
+                        >
+                          <span className="home-list-code">{row.joinCode}</span>
+                          <span className="home-list-as">
+                            {row.displayName ? `as ${row.displayName}` : 'tap to open (set name below if new)'}
+                          </span>
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+
+              <hr className="home-divider" />
+
+              <p className="setup-sub">
+                Display name is how others see you. Create a list and share its code, or join with someone
+                else&apos;s code. Notifications can alert you when the list changes.
+              </p>
+              <div className="setup-fields">
+                <input
+                  className="setup-input"
+                  placeholder="Your display name"
+                  value={nameIn}
+                  onChange={(e) => setNameIn(e.target.value)}
+                  maxLength={24}
+                  autoFocus
+                />
+                <div className="setup-row-btns">
+                  <button
+                    type="button"
+                    className="setup-go"
+                    disabled={roomBusy || !nameIn.trim()}
+                    onClick={handleCreateRoom}
+                  >
+                    New list
+                  </button>
+                </div>
+                <input
+                  className="setup-input"
+                  placeholder="Join code (6 letters)"
+                  value={joinCodeIn}
+                  onChange={(e) => setJoinCodeIn(e.target.value.toUpperCase())}
+                  onKeyDown={(e) => e.key === 'Enter' && handleJoinRoom()}
+                  maxLength={8}
+                />
+                <button
+                  type="button"
+                  className="setup-go secondary"
+                  disabled={roomBusy || !nameIn.trim() || !joinCodeIn.trim()}
+                  onClick={handleJoinRoom}
+                >
+                  Join with code
+                </button>
+                {roomId && (
+                  <button type="button" className="switch-link" onClick={cancelSetup}>
+                    ← Back to list
+                  </button>
+                )}
+                {roomError && (
+                  <p className="setup-sub" style={{ color: '#c0392b', marginTop: 4 }}>
+                    {roomError}
+                  </p>
+                )}
+              </div>
+            </>
+          )}
         </div>
       </div>
     )
