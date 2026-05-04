@@ -12,6 +12,8 @@ create or replace function public.transfer_room_creator (
 as $$
 declare
   current_creator uuid;
+  caller_is_member boolean;
+  current_creator_is_member boolean;
 begin
   if auth.uid() is null then
     raise exception 'not authenticated';
@@ -19,6 +21,17 @@ begin
 
   if p_new_creator_user_id is null then
     raise exception 'new creator is required';
+  end if;
+
+  select exists (
+    select 1
+    from public.room_members rm
+    where rm.room_id = p_room_id
+      and rm.user_id = auth.uid()
+  ) into caller_is_member;
+
+  if not caller_is_member then
+    raise exception 'not a room member';
   end if;
 
   select creator_user_id
@@ -30,18 +43,19 @@ begin
     raise exception 'room not found';
   end if;
 
-  -- Older lists may not have creator_user_id yet; allow a current member to claim/transfer.
-  if current_creator is null then
-    if not exists (
+  -- Normal case: only current creator can transfer.
+  -- Recovery case: if creator is not on this list anymore, any current member can claim/transfer.
+  if current_creator is not null and current_creator <> auth.uid() then
+    select exists (
       select 1
       from public.room_members rm
       where rm.room_id = p_room_id
-        and rm.user_id = auth.uid()
-    ) then
-      raise exception 'not a room member';
+        and rm.user_id = current_creator
+    ) into current_creator_is_member;
+
+    if current_creator_is_member then
+      raise exception 'only the list creator can transfer creator controls';
     end if;
-  elsif current_creator <> auth.uid() then
-    raise exception 'only the list creator can transfer creator controls';
   end if;
 
   if not exists (
