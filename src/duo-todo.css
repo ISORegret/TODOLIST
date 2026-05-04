@@ -188,8 +188,7 @@ body {
   width: 100%;
   margin-bottom: 8px;
 }
-.who-badge { display:flex; align-items:center; gap:7px; background:#1A1A1A; border:1px solid #252525; border-radius:30px; padding:6px 11px 6px 7px; }
-.who-dot { width:24px; height:24px; border-radius:50%; background:#A8C5A0; color:#0F0F0F; font-size:11px; font-weight:600; display:flex; align-items:center; justify-content:center; }
+.who-badge { display:flex; align-items:center; gap:7px; background:#1A1A1A; border:1px solid #252525; border-radius:30px; padding:6px 11px; }
 .who-name { font-size:12px; font-weight:500; color:#666; }
 .switch-link { background:none; border:none; font-family:'Outfit',sans-serif; font-size:10px; color:#2E2E2E; cursor:pointer; letter-spacing:0.05em; text-decoration:underline; transition:color 0.2s; }
 .switch-link:hover { color:#555; }
@@ -564,13 +563,12 @@ body {
 .member-chip {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
   font-size: 12px;
   color: #888;
   background: #1a1a1a;
   border: 1px solid #252525;
   border-radius: 999px;
-  padding: 4px 10px 4px 4px;
+  padding: 4px 10px;
 }
 
 .member-chip-me {
@@ -578,21 +576,3 @@ body {
   color: #b8c5b0;
 }
 
-.member-chip-dot {
-  width: 22px;
-  height: 22px;
-  border-radius: 50%;
-  background: #2a2a2a;
-  color: #a8c5a0;
-  font-size: 10px;
-  font-weight: 600;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  flex-shrink: 0;
-}
-
-.member-chip-me .member-chip-dot {
-  background: #3a4a38;
-  color: #e8f0e4;
-}

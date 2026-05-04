@@ -25,10 +25,6 @@ function genToastId() {
   return Math.random().toString(36).slice(2, 9)
 }
 
-function initLetter(n) {
-  return (n || '?')[0].toUpperCase()
-}
-
 function normalizeAssignees(value) {
   if (Array.isArray(value)) {
     return [...new Set(value.map((n) => (typeof n === 'string' ? n.trim() : '')).filter(Boolean))]
@@ -1280,7 +1276,6 @@ export default function App() {
             </div>
             <div className="header-right">
               <div className="who-badge">
-                <div className="who-dot">{initLetter(myName)}</div>
                 <span className="who-name">{myName}</span>
               </div>
               <button type="button" className="settings-btn" onClick={openListSettings}>
@@ -1346,7 +1341,6 @@ export default function App() {
                   key={m.userId}
                   className={`member-chip${m.userId === myUserId ? ' member-chip-me' : ''}`}
                 >
-                  <span className="member-chip-dot">{initLetter(m.name)}</span>
                   {m.name}
                   {m.userId === myUserId ? ' (you)' : ''}
                 </span>
@@ -1417,7 +1411,7 @@ export default function App() {
                 <div className="task-text">{t.text}</div>
                 <div className="task-meta">
                   <span className={`chip ${isMe(t.by) ? 'chip-me' : 'chip-cw'}`}>
-                    {initLetter(t.by)} {t.by}
+                    {t.by}
                   </span>
                   {t.assignedTo.length > 0 && (
                     <span className="chip chip-assign">→ {formatAssignees(t.assignedTo)}</span>
@@ -1467,7 +1461,7 @@ export default function App() {
                     <div className="task-text done">{t.text}</div>
                     <div className="task-meta">
                       <span className={`chip ${isMe(t.by) ? 'chip-me' : 'chip-cw'}`}>
-                        {initLetter(t.by)} {t.by}
+                        {t.by}
                       </span>
                       {t.assignedTo.length > 0 && (
                         <span className="chip chip-assign">→ {formatAssignees(t.assignedTo)}</span>
