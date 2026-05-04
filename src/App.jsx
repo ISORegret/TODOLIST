@@ -933,14 +933,14 @@ export default function App() {
     membersDetail.filter((m) => m.userId !== myUserId).map((m) => m.name).join(', ') || 'your group'
 
   const vis = tasks.filter((t) => {
-    if (filter === 'mine') return t.by === myName
-    if (filter === 'forme') return t.assignedTo === myName && !t.done
     if (filter === 'done') return t.done
-    return true
+    if (filter === 'mine') return t.by === myName && !t.done
+    if (filter === 'forme') return t.assignedTo === myName && !t.done
+    return !t.done
   })
 
-  const active = vis.filter((t) => !t.done)
-  const done = vis.filter((t) => t.done)
+  const active = filter === 'done' ? [] : vis
+  const done = filter === 'done' ? vis : []
   const pct = tasks.length
     ? Math.round((tasks.filter((t) => t.done).length / tasks.length) * 100)
     : 0
@@ -1415,7 +1415,7 @@ export default function App() {
 
           {done.length > 0 && (
             <>
-              <div className="section-label">Completed</div>
+              <div className="section-label">Done</div>
               {done.map((t) => (
                 <div key={t.id} className="task-item done">
                   <button
