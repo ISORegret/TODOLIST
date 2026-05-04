@@ -902,8 +902,8 @@ export default function App() {
     setRoomError('')
     setRoomTitle('')
     const resolved =
-      entry.displayName ||
       nameIn.trim() ||
+      entry.displayName ||
       (typeof localStorage !== 'undefined' ? localStorage.getItem(LS_NAME) : '') ||
       ''
     if (!resolved.trim()) {
