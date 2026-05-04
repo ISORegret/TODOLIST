@@ -1191,15 +1191,18 @@ export default function App() {
   }
 
   function openListSettings() {
+    const me = session?.user?.id || ''
+    const preferredTarget =
+      membersDetail.find((m) => m.userId === me && m.userId !== creatorUserId)?.userId ||
+      membersDetail.find((m) => m.userId !== creatorUserId)?.userId ||
+      ''
     setCustomCodeDraft(joinCodeDisplay || '')
     setCustomCodeMsg('')
     setListTitleDraft(roomTitle)
     setListTitleMsg('')
     setRemoveMemberMsg('')
     setTransferCreatorMsg('')
-    setTransferCreatorUserId(
-      membersDetail.find((m) => m.userId !== creatorUserId)?.userId || '',
-    )
+    setTransferCreatorUserId(preferredTarget)
     setNotifActionMsg('')
     setSettingsOpen(true)
   }
@@ -1545,6 +1548,11 @@ export default function App() {
   const myUserId = session?.user?.id
   const removableMembers = membersDetail.filter((m) => m.userId !== myUserId)
   const transferableMembers = membersDetail.filter((m) => m.userId !== creatorUserId)
+  const creatorIsListedMember = creatorUserId
+    ? membersDetail.some((m) => m.userId === creatorUserId)
+    : false
+  const canRecoverCreatorControls = !isRoomCreator && !creatorIsListedMember
+  const canManageCreatorControls = isRoomCreator || canRecoverCreatorControls
   const creatorName = creatorUserId
     ? creatorUserId === myUserId
       ? `${myName || 'You'} (you)`
@@ -2328,13 +2336,21 @@ export default function App() {
               </p>
               {notifActionMsg && <p className="list-modal-msg">{notifActionMsg}</p>}
 
-              {isRoomCreator ? (
+              {canManageCreatorControls ? (
                 <>
                   <hr className="list-modal-divider" />
-                  <p className="list-modal-label">Transfer creator controls</p>
-                  <p className="list-modal-hint">
-                    Move creator controls to another member before removing old users/devices.
+                  <p className="list-modal-label">
+                    {isRoomCreator ? 'Transfer creator controls' : 'Recover creator controls'}
                   </p>
+                  {isRoomCreator ? (
+                    <p className="list-modal-hint">
+                      Move creator controls to another member before removing old users/devices.
+                    </p>
+                  ) : (
+                    <p className="list-modal-hint">
+                      The recorded creator is no longer on this list. Choose who should own creator controls now.
+                    </p>
+                  )}
                   {transferableMembers.length === 0 ? (
                     <p className="list-modal-hint">No other members available for transfer.</p>
                   ) : (
@@ -2359,59 +2375,71 @@ export default function App() {
                         disabled={transferCreatorBusy || !transferCreatorUserId}
                         onClick={handleTransferCreator}
                       >
-                        {transferCreatorBusy ? 'Transferring…' : 'Transfer creator'}
+                        {transferCreatorBusy
+                          ? 'Working…'
+                          : isRoomCreator
+                            ? 'Transfer creator'
+                            : 'Claim creator'}
                       </button>
                     </div>
                   )}
                   {transferCreatorMsg && <p className="list-modal-msg">{transferCreatorMsg}</p>}
 
-                  <hr className="list-modal-divider" />
-                  <p className="list-modal-label">Members (creator controls)</p>
-                  <p className="list-modal-hint">Remove stale members/devices from this list.</p>
-                  {removableMembers.length === 0 ? (
-                    <p className="list-modal-hint">No other members to remove.</p>
-                  ) : (
-                    <div className="list-modal-members">
-                      {removableMembers.map((member) => (
-                        <div key={member.userId} className="list-modal-member-row">
-                          <span className="list-modal-member-name">{member.name}</span>
-                          <button
-                            type="button"
-                            className="setup-go secondary list-modal-member-remove"
-                            disabled={Boolean(removeMemberBusyId)}
-                            onClick={() => handleRemoveMember(member)}
-                          >
-                            {removeMemberBusyId === member.userId ? 'Removing…' : 'Remove'}
-                          </button>
+                  {isRoomCreator ? (
+                    <>
+                      <hr className="list-modal-divider" />
+                      <p className="list-modal-label">Members (creator controls)</p>
+                      <p className="list-modal-hint">Remove stale members/devices from this list.</p>
+                      {removableMembers.length === 0 ? (
+                        <p className="list-modal-hint">No other members to remove.</p>
+                      ) : (
+                        <div className="list-modal-members">
+                          {removableMembers.map((member) => (
+                            <div key={member.userId} className="list-modal-member-row">
+                              <span className="list-modal-member-name">{member.name}</span>
+                              <button
+                                type="button"
+                                className="setup-go secondary list-modal-member-remove"
+                                disabled={Boolean(removeMemberBusyId)}
+                                onClick={() => handleRemoveMember(member)}
+                              >
+                                {removeMemberBusyId === member.userId ? 'Removing…' : 'Remove'}
+                              </button>
+                            </div>
+                          ))}
                         </div>
-                      ))}
-                    </div>
-                  )}
-                  {removeMemberMsg && <p className="list-modal-msg">{removeMemberMsg}</p>}
+                      )}
+                      {removeMemberMsg && <p className="list-modal-msg">{removeMemberMsg}</p>}
 
-                  <hr className="list-modal-divider" />
-                  <p className="list-modal-label">Custom join code (you created this list)</p>
-                  <p className="list-modal-hint">
-                    4–8 letters or numbers. Anyone already in the list should use the new code after you save.
-                  </p>
-                  <div className="list-modal-code-row list-modal-code-row--stack">
-                    <input
-                      className="setup-input"
-                      value={customCodeDraft}
-                      onChange={(e) => setCustomCodeDraft(e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, ''))}
-                      maxLength={8}
-                      placeholder="E.g. FAMILY1"
-                    />
-                    <button
-                      type="button"
-                      className="setup-go"
-                      disabled={customCodeBusy || customCodeDraft.length < 4}
-                      onClick={handleApplyCustomCode}
-                    >
-                      Save new code
-                    </button>
-                  </div>
-                  {customCodeMsg && <p className="list-modal-msg">{customCodeMsg}</p>}
+                      <hr className="list-modal-divider" />
+                      <p className="list-modal-label">Custom join code (you created this list)</p>
+                      <p className="list-modal-hint">
+                        4–8 letters or numbers. Anyone already in the list should use the new code after you save.
+                      </p>
+                      <div className="list-modal-code-row list-modal-code-row--stack">
+                        <input
+                          className="setup-input"
+                          value={customCodeDraft}
+                          onChange={(e) => setCustomCodeDraft(e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, ''))}
+                          maxLength={8}
+                          placeholder="E.g. FAMILY1"
+                        />
+                        <button
+                          type="button"
+                          className="setup-go"
+                          disabled={customCodeBusy || customCodeDraft.length < 4}
+                          onClick={handleApplyCustomCode}
+                        >
+                          Save new code
+                        </button>
+                      </div>
+                      {customCodeMsg && <p className="list-modal-msg">{customCodeMsg}</p>}
+                    </>
+                  ) : (
+                    <p className="list-modal-hint" style={{ marginTop: 8 }}>
+                      After assigning creator controls, this section will unlock member removal and join-code edits.
+                    </p>
+                  )}
                 </>
               ) : (
                 <p className="list-modal-hint" style={{ marginTop: 14 }}>
