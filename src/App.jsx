@@ -123,6 +123,23 @@ function memberLabelFromRow(row) {
   return raw ? `Member ${raw.slice(0, 6)}` : 'Member'
 }
 
+function memberLabelFromUserId(userId) {
+  const raw = (userId || '').replace(/-/g, '')
+  return raw ? `Member ${raw.slice(0, 6)}` : 'Member'
+}
+
+function hasRecoverySignal() {
+  if (typeof window === 'undefined') return false
+  try {
+    const search = new URLSearchParams(window.location.search || '')
+    if (search.get('recovery') === '1') return true
+  } catch {
+    /* ignore */
+  }
+  const hash = window.location.hash || ''
+  return /type=recovery/i.test(hash)
+}
+
 export default function App() {
   const [session, setSession] = useState(null)
   const [authReady, setAuthReady] = useState(false)
@@ -138,6 +155,7 @@ export default function App() {
   )
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [isRoomCreator, setIsRoomCreator] = useState(false)
+  const [creatorUserId, setCreatorUserId] = useState('')
   const [customCodeDraft, setCustomCodeDraft] = useState('')
   const [customCodeBusy, setCustomCodeBusy] = useState(false)
   const [customCodeMsg, setCustomCodeMsg] = useState('')
@@ -147,11 +165,16 @@ export default function App() {
   const [listTitleBusy, setListTitleBusy] = useState(false)
   const [listTitleMsg, setListTitleMsg] = useState('')
   const [leaveListBusy, setLeaveListBusy] = useState(false)
+  const [removeMemberBusyId, setRemoveMemberBusyId] = useState('')
+  const [removeMemberMsg, setRemoveMemberMsg] = useState('')
   const [myName, setMyName] = useState(() => localStorage.getItem(LS_NAME) || '')
   const [nameIn, setNameIn] = useState('')
   const [joinCodeIn, setJoinCodeIn] = useState('')
   const [roomBusy, setRoomBusy] = useState(false)
   const [roomError, setRoomError] = useState('')
+  const [recoveryMode, setRecoveryMode] = useState(() => hasRecoverySignal())
+  const [resetPassIn, setResetPassIn] = useState('')
+  const [resetPassConfirmIn, setResetPassConfirmIn] = useState('')
 
   /** True while changing name / list without leaving current room yet */
   const [setupPhase, setSetupPhase] = useState(false)
@@ -511,14 +534,26 @@ export default function App() {
       .eq('room_id', rid)
     if (error) return
     const rows = data || []
-    const detail = rows.map((r) => ({
+    let detail = rows.map((r) => ({
       userId: r.user_id,
       name: memberLabelFromRow(r),
     }))
+    const myNameKey = (myName || '').trim().toLowerCase()
+    if (myNameKey) {
+      const selfNamedRows = detail.filter((d) => d.name.trim().toLowerCase() === myNameKey)
+      if (selfNamedRows.length > 1) {
+        const preferred =
+          selfNamedRows.find((d) => d.userId === session?.user?.id) || selfNamedRows[0]
+        detail = [
+          ...detail.filter((d) => d.name.trim().toLowerCase() !== myNameKey),
+          preferred,
+        ]
+      }
+    }
     detail.sort((a, b) => a.name.localeCompare(b.name))
     setMembersDetail(detail)
     setMembers([...new Set(detail.map((d) => d.name))])
-  }, [])
+  }, [myName, session?.user?.id, supabase])
 
   const loadMyLists = useCallback(async () => {
     if (!supabase) return
@@ -602,9 +637,14 @@ export default function App() {
         setAuthReady(true)
       })
 
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, s) => {
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((event, s) => {
       setSession(s ?? null)
       setAuthError(null)
+      if (event === 'PASSWORD_RECOVERY') {
+        setRecoveryMode(true)
+        setAccountError('')
+        setAccountSuccess('Reset link verified. Enter your new password below.')
+      }
     })
 
     return () => {
@@ -655,6 +695,7 @@ export default function App() {
     setRoomId('')
     setJoinCodeDisplay('')
     setRoomTitle('')
+    setCreatorUserId('')
     setNewListTitle('')
     setMembers([])
     setMembersDetail([])
@@ -665,6 +706,8 @@ export default function App() {
     setIsRoomCreator(false)
     setCustomCodeMsg('')
     setListTitleMsg('')
+    setRemoveMemberMsg('')
+    setRemoveMemberBusyId('')
     setPingingUserId('')
     pingCooldownRef.current = new Map()
     seenPingIdsRef.current = new Set()
@@ -771,6 +814,7 @@ export default function App() {
       }
       if (!cancelled && roomIdRef.current === ridAtStart) {
         setRoomTitle(typeof roomRow?.title === 'string' ? roomRow.title : '')
+        setCreatorUserId(typeof roomRow?.creator_user_id === 'string' ? roomRow.creator_user_id : '')
       }
       const { data: { user: roomUser } } = await supabase.auth.getUser()
       const roomUserId = roomUser?.id || ''
@@ -935,11 +979,49 @@ export default function App() {
     setAccountBusy(true)
     setAccountError('')
     setAccountSuccess('')
-    const origin = `${window.location.origin}${window.location.pathname || '/'}`
-    const { error } = await supabase.auth.resetPasswordForEmail(email, { redirectTo: origin })
+    const base = `${window.location.origin}${window.location.pathname || '/'}`
+    const redirectTo = `${base}${base.includes('?') ? '&' : '?'}recovery=1`
+    const { error } = await supabase.auth.resetPasswordForEmail(email, { redirectTo })
     setAccountBusy(false)
-    if (error) setAccountError(error.message || 'Could not send reset email')
-    else setAccountSuccess('If that address has an account, a reset link was sent.')
+    if (error) {
+      const redirectHint =
+        /redirect|URL|not allowed|invalid/i.test(error.message || '')
+          ? ' Add your site URL to Supabase Auth URL Configuration (Site URL + Redirect URLs), then retry.'
+          : ''
+      setAccountError((error.message || 'Could not send reset email') + redirectHint)
+    } else {
+      setAccountSuccess('If that address has an account, a reset link was sent. Check spam/junk too.')
+    }
+  }
+
+  async function handleCompletePasswordReset(ev) {
+    ev?.preventDefault?.()
+    if (!supabase) return
+    if (!resetPassIn || resetPassIn.length < 6) {
+      setAccountError('Use a new password with at least 6 characters.')
+      return
+    }
+    if (resetPassIn !== resetPassConfirmIn) {
+      setAccountError('New password and confirmation do not match.')
+      return
+    }
+    setAccountBusy(true)
+    setAccountError('')
+    setAccountSuccess('')
+    const { error } = await supabase.auth.updateUser({ password: resetPassIn })
+    setAccountBusy(false)
+    if (error) {
+      setAccountError(error.message || 'Could not update password')
+      return
+    }
+    setResetPassIn('')
+    setResetPassConfirmIn('')
+    setRecoveryMode(false)
+    setAccountSuccess('Password updated. You can now sign in with the new password.')
+    if (typeof window !== 'undefined') {
+      const cleanUrl = `${window.location.origin}${window.location.pathname || '/'}`
+      window.history.replaceState({}, '', cleanUrl)
+    }
   }
 
   async function handleContinueGuest() {
@@ -1107,6 +1189,7 @@ export default function App() {
     setCustomCodeMsg('')
     setListTitleDraft(roomTitle)
     setListTitleMsg('')
+    setRemoveMemberMsg('')
     setNotifActionMsg('')
     setSettingsOpen(true)
   }
@@ -1138,6 +1221,40 @@ export default function App() {
     } catch {
       showToast(`Code: ${c}`)
     }
+  }
+
+  async function handleRemoveMember(member) {
+    if (!supabase || !roomId || !member?.userId) return
+    const targetId = member.userId
+    const targetName = (member.name || 'member').trim() || 'member'
+    const me = session?.user?.id || ''
+    if (targetId === me) return
+    if (removeMemberBusyId) return
+
+    setRemoveMemberMsg('')
+    setRemoveMemberBusyId(targetId)
+    const { error } = await supabase
+      .from('room_members')
+      .delete()
+      .eq('room_id', roomId)
+      .eq('user_id', targetId)
+    setRemoveMemberBusyId('')
+
+    if (error) {
+      console.error('remove member', error)
+      const blocked =
+        error.code === '42501' ||
+        /row-level security|RLS|permission denied|not allowed/i.test(error.message || '')
+      const msg = blocked
+        ? 'Could not remove member — run the latest Supabase migration for creator member removal.'
+        : `Could not remove member: ${error.message || 'Unknown error'}`
+      setRemoveMemberMsg(msg)
+      showToast(msg)
+      return
+    }
+    await loadMembers(roomId)
+    setRemoveMemberMsg(`Removed ${targetName}.`)
+    showToast(`Removed ${targetName} from this list`)
   }
 
   async function sendPing(toUserId, toName) {
@@ -1385,6 +1502,12 @@ export default function App() {
   )
 
   const myUserId = session?.user?.id
+  const removableMembers = membersDetail.filter((m) => m.userId !== myUserId)
+  const creatorName = creatorUserId
+    ? creatorUserId === myUserId
+      ? `${myName || 'You'} (you)`
+      : membersDetail.find((m) => m.userId === creatorUserId)?.name || memberLabelFromUserId(creatorUserId)
+    : 'Not available (older list)'
   const othersLabel =
     membersDetail.filter((m) => m.userId !== myUserId).map((m) => m.name).join(', ') || 'your group'
 
@@ -1459,7 +1582,7 @@ export default function App() {
     )
   }
 
-  if (!session || !roomId || setupPhase) {
+  if (!session || !roomId || setupPhase || recoveryMode) {
     const sessionEmail = session?.user?.email
     const isGuestSession = Boolean(session?.user && !sessionEmail)
 
@@ -1483,86 +1606,144 @@ export default function App() {
             </div>
           </div>
 
-          {!session ? (
+          {!session || recoveryMode ? (
             <>
-              <p className="setup-sub">
-                Use the same email on every device so you show up once on each list. After you sign in,
-                pick a display name, then create or join a list.
-              </p>
-              <form
-                className="setup-fields account-form"
-                onSubmit={(e) => {
-                  e.preventDefault()
-                  handleSignIn(e)
-                }}
-              >
-                <input
-                  className="setup-input"
-                  type="email"
-                  autoComplete="email"
-                  placeholder="Email"
-                  value={emailIn}
-                  autoFocus
-                  onChange={(e) => {
-                    setEmailIn(e.target.value)
-                    setAccountError('')
-                    setAccountSuccess('')
-                  }}
-                />
-                <input
-                  className="setup-input"
-                  type="password"
-                  autoComplete="current-password"
-                  placeholder="Password"
-                  value={passwordIn}
-                  onChange={(e) => {
-                    setPasswordIn(e.target.value)
-                    setAccountError('')
-                  }}
-                />
-                <div className="setup-row-btns">
-                  <button type="submit" className="setup-go" disabled={accountBusy}>
-                    Sign in
-                  </button>
-                  <button
-                    type="button"
-                    className="setup-go secondary"
-                    disabled={accountBusy}
-                    onClick={handleSignUp}
+              {!recoveryMode ? (
+                <>
+                  <p className="setup-sub">
+                    Use the same email on every device so you show up once on each list. After you sign in,
+                    pick a display name, then create or join a list.
+                  </p>
+                  <form
+                    className="setup-fields account-form"
+                    onSubmit={(e) => {
+                      e.preventDefault()
+                      handleSignIn(e)
+                    }}
                   >
-                    Create account
-                  </button>
-                </div>
-                <button
-                  type="button"
-                  className="switch-link"
-                  disabled={accountBusy}
-                  onClick={handleForgotPassword}
-                >
-                  Forgot password?
-                </button>
-                <p className="setup-sub" style={{ marginTop: 8 }}>
-                  Or continue without email (same device only; enable Anonymous in Supabase):
-                </p>
-                <button
-                  type="button"
-                  className="setup-go secondary"
-                  disabled={accountBusy}
-                  onClick={handleContinueGuest}
-                >
-                  Continue as guest
-                </button>
-                {accountError && (
-                  <p className="setup-sub" style={{ color: '#c0392b', marginTop: 8 }}>
-                    {accountError}
+                    <input
+                      className="setup-input"
+                      type="email"
+                      autoComplete="email"
+                      placeholder="Email"
+                      value={emailIn}
+                      autoFocus
+                      onChange={(e) => {
+                        setEmailIn(e.target.value)
+                        setAccountError('')
+                        setAccountSuccess('')
+                      }}
+                    />
+                    <input
+                      className="setup-input"
+                      type="password"
+                      autoComplete="current-password"
+                      placeholder="Password"
+                      value={passwordIn}
+                      onChange={(e) => {
+                        setPasswordIn(e.target.value)
+                        setAccountError('')
+                      }}
+                    />
+                    <div className="setup-row-btns">
+                      <button type="submit" className="setup-go" disabled={accountBusy}>
+                        Sign in
+                      </button>
+                      <button
+                        type="button"
+                        className="setup-go secondary"
+                        disabled={accountBusy}
+                        onClick={handleSignUp}
+                      >
+                        Create account
+                      </button>
+                    </div>
+                    <button
+                      type="button"
+                      className="switch-link"
+                      disabled={accountBusy}
+                      onClick={handleForgotPassword}
+                    >
+                      Forgot password?
+                    </button>
+                    <p className="setup-sub" style={{ marginTop: 8 }}>
+                      Or continue without email (same device only; enable Anonymous in Supabase):
+                    </p>
+                    <button
+                      type="button"
+                      className="setup-go secondary"
+                      disabled={accountBusy}
+                      onClick={handleContinueGuest}
+                    >
+                      Continue as guest
+                    </button>
+                    {accountError && (
+                      <p className="setup-sub" style={{ color: '#c0392b', marginTop: 8 }}>
+                        {accountError}
+                      </p>
+                    )}
+                    {accountSuccess && (
+                      <p className="setup-sub" style={{ color: '#8CB4D4', marginTop: 8 }}>
+                        {accountSuccess}
+                      </p>
+                    )}
+                  </form>
+                </>
+              ) : (
+                <>
+                  <p className="setup-sub">
+                    Set a new password for your account, then sign in with it on all devices.
                   </p>
-                )}
-                {accountSuccess && (
-                  <p className="setup-sub" style={{ color: '#8CB4D4', marginTop: 8 }}>
-                    {accountSuccess}
-                  </p>
-                )}
-              </form>
+                  <form className="setup-fields account-form" onSubmit={handleCompletePasswordReset}>
+                    <input
+                      className="setup-input"
+                      type="password"
+                      autoComplete="new-password"
+                      placeholder="New password (min 6 chars)"
+                      value={resetPassIn}
+                      autoFocus
+                      onChange={(e) => {
+                        setResetPassIn(e.target.value)
+                        setAccountError('')
+                      }}
+                    />
+                    <input
+                      className="setup-input"
+                      type="password"
+                      autoComplete="new-password"
+                      placeholder="Confirm new password"
+                      value={resetPassConfirmIn}
+                      onChange={(e) => {
+                        setResetPassConfirmIn(e.target.value)
+                        setAccountError('')
+                      }}
+                    />
+                    <div className="setup-row-btns">
+                      <button type="submit" className="setup-go" disabled={accountBusy}>
+                        Save new password
+                      </button>
+                      <button
+                        type="button"
+                        className="setup-go secondary"
+                        disabled={accountBusy}
+                        onClick={() => setRecoveryMode(false)}
+                      >
+                        Back
+                      </button>
+                    </div>
+                    {accountError && (
+                      <p className="setup-sub" style={{ color: '#c0392b', marginTop: 8 }}>
+                        {accountError}
+                      </p>
+                    )}
+                    {accountSuccess && (
+                      <p className="setup-sub" style={{ color: '#8CB4D4', marginTop: 8 }}>
+                        {accountSuccess}
+                      </p>
+                    )}
+                  </form>
+                </>
+              )}
             </>
           ) : (
             <>
@@ -1757,10 +1938,18 @@ export default function App() {
                   {' '}
                   · Share code: <strong>{joinCodeDisplay}</strong>
                 </span>
+                <span className="room-banner-meta">
+                  {' '}
+                  · Created by <strong>{creatorName}</strong>
+                </span>
               </>
             ) : (
               <>
                 Share code: <strong>{joinCodeDisplay}</strong>
+                <span className="room-banner-meta">
+                  {' '}
+                  · Created by <strong>{creatorName}</strong>
+                </span>
               </>
             )}
             <span className="hint">
@@ -2044,6 +2233,9 @@ export default function App() {
                 </button>
               </div>
               {listTitleMsg && <p className="list-modal-msg">{listTitleMsg}</p>}
+              <p className="list-modal-hint">
+                Created by <strong>{creatorName}</strong>
+              </p>
 
               <hr className="list-modal-divider" />
               <p className="list-modal-label">Join code</p>
@@ -2096,6 +2288,30 @@ export default function App() {
 
               {isRoomCreator ? (
                 <>
+                  <hr className="list-modal-divider" />
+                  <p className="list-modal-label">Members (creator controls)</p>
+                  <p className="list-modal-hint">Remove stale members/devices from this list.</p>
+                  {removableMembers.length === 0 ? (
+                    <p className="list-modal-hint">No other members to remove.</p>
+                  ) : (
+                    <div className="list-modal-members">
+                      {removableMembers.map((member) => (
+                        <div key={member.userId} className="list-modal-member-row">
+                          <span className="list-modal-member-name">{member.name}</span>
+                          <button
+                            type="button"
+                            className="setup-go secondary list-modal-member-remove"
+                            disabled={Boolean(removeMemberBusyId)}
+                            onClick={() => handleRemoveMember(member)}
+                          >
+                            {removeMemberBusyId === member.userId ? 'Removing…' : 'Remove'}
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                  {removeMemberMsg && <p className="list-modal-msg">{removeMemberMsg}</p>}
+
                   <hr className="list-modal-divider" />
                   <p className="list-modal-label">Custom join code (you created this list)</p>
                   <p className="list-modal-hint">
