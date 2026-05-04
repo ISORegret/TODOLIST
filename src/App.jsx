@@ -511,14 +511,26 @@ export default function App() {
       .eq('room_id', rid)
     if (error) return
     const rows = data || []
-    const detail = rows.map((r) => ({
+    let detail = rows.map((r) => ({
       userId: r.user_id,
       name: memberLabelFromRow(r),
     }))
+    const myNameKey = (myName || '').trim().toLowerCase()
+    if (myNameKey) {
+      const selfNamedRows = detail.filter((d) => d.name.trim().toLowerCase() === myNameKey)
+      if (selfNamedRows.length > 1) {
+        const preferred =
+          selfNamedRows.find((d) => d.userId === session?.user?.id) || selfNamedRows[0]
+        detail = [
+          ...detail.filter((d) => d.name.trim().toLowerCase() !== myNameKey),
+          preferred,
+        ]
+      }
+    }
     detail.sort((a, b) => a.name.localeCompare(b.name))
     setMembersDetail(detail)
     setMembers([...new Set(detail.map((d) => d.name))])
-  }, [])
+  }, [myName, session?.user?.id, supabase])
 
   const loadMyLists = useCallback(async () => {
     if (!supabase) return
