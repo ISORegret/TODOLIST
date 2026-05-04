@@ -172,6 +172,8 @@ export default function App() {
       ? Notification.permission
       : 'default',
   )
+  const [notifActionBusy, setNotifActionBusy] = useState(false)
+  const [notifActionMsg, setNotifActionMsg] = useState('')
   const [unread, setUnread] = useState(0)
   const [newIds, setNewIds] = useState(() => new Set())
   /** Rooms the current user belongs to (home screen) */
@@ -291,17 +293,30 @@ export default function App() {
     }
   }, [])
 
-  const syncPushSubscription = useCallback(async () => {
-    if (!supabase || !session?.user?.id) return
-    if (notifPerm !== 'granted') return
-    if (!VAPID_PUBLIC_KEY) return
-    if (typeof window === 'undefined') return
-    if (!('serviceWorker' in navigator) || !('PushManager' in window)) return
+  const syncPushSubscription = useCallback(async ({ forceResubscribe = false } = {}) => {
+    if (!supabase || !session?.user?.id) {
+      return { ok: false, message: 'Sign in first to enable notifications on this device.' }
+    }
+    if (typeof window === 'undefined') return { ok: false, message: 'Notifications require a browser.' }
+    if (!('Notification' in window)) return { ok: false, message: 'This browser does not support notifications.' }
+    if (Notification.permission !== 'granted') {
+      return { ok: false, message: 'Allow notifications in your browser first.' }
+    }
+    if (!VAPID_PUBLIC_KEY) {
+      return { ok: false, message: 'Missing VAPID key. Set VITE_VAPID_PUBLIC_KEY and redeploy.' }
+    }
+    if (!('serviceWorker' in navigator) || !('PushManager' in window)) {
+      return { ok: false, message: 'Push is not supported in this browser.' }
+    }
     try {
       const reg = swRegRef.current || (await navigator.serviceWorker.ready)
-      if (!reg) return
+      if (!reg) return { ok: false, message: 'Service worker not ready yet. Retry in a moment.' }
       swRegRef.current = reg
       let sub = await reg.pushManager.getSubscription()
+      if (sub && forceResubscribe) {
+        await sub.unsubscribe()
+        sub = null
+      }
       if (!sub) {
         sub = await reg.pushManager.subscribe({
           userVisibleOnly: true,
@@ -311,7 +326,9 @@ export default function App() {
       const json = sub.toJSON()
       const p256dh = json?.keys?.p256dh || ''
       const auth = json?.keys?.auth || ''
-      if (!sub.endpoint || !p256dh || !auth) return
+      if (!sub.endpoint || !p256dh || !auth) {
+        return { ok: false, message: 'Push subscription is incomplete. Please retry.' }
+      }
       const { error } = await supabase.from('push_subscriptions').upsert(
         {
           user_id: session.user.id,
@@ -325,16 +342,35 @@ export default function App() {
         },
         { onConflict: 'endpoint' },
       )
-      if (error) console.error('push_subscriptions upsert', error)
+      if (error) {
+        console.error('push_subscriptions upsert', error)
+        return { ok: false, message: error.message || 'Could not save push subscription.' }
+      }
+      return { ok: true, message: 'Notifications enabled and refreshed for this device.' }
     } catch (err) {
       console.error('sync push subscription failed', err)
+      const msg = err && typeof err === 'object' && 'message' in err ? String(err.message || '') : ''
+      if (/applicationServerKey/i.test(msg)) {
+        return {
+          ok: false,
+          message:
+            'Your VAPID public key is invalid. Regenerate keys and update VITE_VAPID_PUBLIC_KEY.',
+        }
+      }
+      return { ok: false, message: msg || 'Could not refresh push subscription.' }
     }
-  }, [notifPerm, session?.user?.id, supabase])
+  }, [session?.user?.id, supabase])
 
   useEffect(() => {
     if (notifPerm !== 'granted') return
     void syncPushSubscription()
   }, [notifPerm, session?.user?.id, syncPushSubscription])
+
+  useEffect(() => {
+    if (!settingsOpen) return
+    if (typeof window === 'undefined' || !('Notification' in window)) return
+    setNotifPerm(Notification.permission)
+  }, [settingsOpen])
 
   const handleIncomingPing = useCallback(
     (row, targetUserId) => {
@@ -418,10 +454,40 @@ export default function App() {
   )
 
   async function requestNotif() {
-    if (!('Notification' in window)) return
+    if (typeof window === 'undefined' || !('Notification' in window)) return
     const perm = await Notification.requestPermission()
     setNotifPerm(perm)
     if (perm === 'granted') await syncPushSubscription()
+  }
+
+  async function handleRefreshNotifications() {
+    if (typeof window === 'undefined') return
+    setNotifActionMsg('')
+    setNotifActionBusy(true)
+    try {
+      if (!('Notification' in window)) {
+        setNotifActionMsg('This browser does not support notifications.')
+        return
+      }
+      let perm = Notification.permission
+      setNotifPerm(perm)
+      if (perm !== 'granted') {
+        perm = await Notification.requestPermission()
+        setNotifPerm(perm)
+      }
+      if (perm === 'denied') {
+        setNotifActionMsg('Notifications are blocked in browser settings for this site.')
+        return
+      }
+      if (perm !== 'granted') {
+        setNotifActionMsg('Notification permission not granted.')
+        return
+      }
+      const result = await syncPushSubscription({ forceResubscribe: true })
+      setNotifActionMsg(result?.message || 'Notification setup complete.')
+    } finally {
+      setNotifActionBusy(false)
+    }
   }
 
   const continueAsGuest = useCallback(async () => {
@@ -1041,6 +1107,7 @@ export default function App() {
     setCustomCodeMsg('')
     setListTitleDraft(roomTitle)
     setListTitleMsg('')
+    setNotifActionMsg('')
     setSettingsOpen(true)
   }
 
@@ -1994,6 +2061,38 @@ export default function App() {
               <p className="list-modal-hint">
                 Share this code so others can join from the home screen under &quot;Join with code&quot;.
               </p>
+
+              <hr className="list-modal-divider" />
+              <p className="list-modal-label">Notifications</p>
+              <p className="list-modal-hint">
+                Use this on each device/browser where you want alerts. If already enabled, this refreshes your
+                notification subscription.
+              </p>
+              <div className="list-modal-code-row list-modal-code-row--stack">
+                <button
+                  type="button"
+                  className="setup-go"
+                  disabled={notifActionBusy}
+                  onClick={handleRefreshNotifications}
+                >
+                  {notifActionBusy
+                    ? 'Working…'
+                    : notifPerm === 'granted'
+                      ? 'Refresh notifications'
+                      : 'Enable notifications'}
+                </button>
+              </div>
+              <p className="list-modal-hint">
+                Status:{' '}
+                <strong>
+                  {notifPerm === 'granted'
+                    ? 'Enabled'
+                    : notifPerm === 'denied'
+                      ? 'Blocked by browser settings'
+                      : 'Not enabled yet'}
+                </strong>
+              </p>
+              {notifActionMsg && <p className="list-modal-msg">{notifActionMsg}</p>}
 
               {isRoomCreator ? (
                 <>
