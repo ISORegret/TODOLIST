@@ -172,6 +172,8 @@ export default function App() {
   const setupDoneRef = useRef(false)
   const prefsScopeRef = useRef('')
   const pingCooldownRef = useRef(new Map())
+  const seenPingIdsRef = useRef(new Set())
+  const lastPingAtRef = useRef('')
 
   useEffect(() => {
     myNameRef.current = myName
@@ -257,6 +259,34 @@ export default function App() {
       }
     }
   }, [])
+
+  const handleIncomingPing = useCallback(
+    (row, targetUserId) => {
+      if (!row || !targetUserId) return
+      if (row.to_user_id !== targetUserId) return
+      const pingId = typeof row.id === 'string' ? row.id : ''
+      if (pingId && seenPingIdsRef.current.has(pingId)) return
+      if (pingId) {
+        seenPingIdsRef.current.add(pingId)
+        // Keep dedupe memory bounded for long-running sessions.
+        if (seenPingIdsRef.current.size > 300) {
+          const ids = [...seenPingIdsRef.current]
+          seenPingIdsRef.current = new Set(ids.slice(-180))
+        }
+      }
+      const createdAt = typeof row.created_at === 'string' ? row.created_at : ''
+      if (createdAt && (!lastPingAtRef.current || createdAt > lastPingAtRef.current)) {
+        lastPingAtRef.current = createdAt
+      }
+      const sender = (row.from_name || '').trim() || 'Someone'
+      const body = (row.message || '').trim() || `${sender} pinged you`
+      showToast(`📣 Ping from ${sender}`, { timeoutMs: 5200 })
+      sendBrowserNotif(`Ping from ${sender}`, body)
+      playChime('ping')
+      if (!document.hasFocus()) setUnread((u) => u + 1)
+    },
+    [showToast, sendBrowserNotif],
+  )
 
   const handleDiff = useCallback(
     (prev, next, me) => {
@@ -494,6 +524,8 @@ export default function App() {
     setListTitleMsg('')
     setPingingUserId('')
     pingCooldownRef.current = new Map()
+    seenPingIdsRef.current = new Set()
+    lastPingAtRef.current = ''
   }, [])
 
   const leaveListFlightRef = useRef(false)
@@ -542,6 +574,7 @@ export default function App() {
     const ridAtStart = roomId
     setupDoneRef.current = Boolean(myName.trim())
     const chRef = { current: null }
+    const pollTimerRef = { current: null }
     let cancelled = false
 
     ;(async () => {
@@ -597,18 +630,42 @@ export default function App() {
         setRoomTitle(typeof roomRow?.title === 'string' ? roomRow.title : '')
       }
       const { data: { user: roomUser } } = await supabase.auth.getUser()
+      const roomUserId = roomUser?.id || ''
+      if (!roomUserId) return
       if (!cancelled && roomIdRef.current === ridAtStart) {
         setIsRoomCreator(
           Boolean(
-            roomUser?.id &&
+            roomUserId &&
               roomRow?.creator_user_id &&
-              roomUser.id === roomRow.creator_user_id,
+              roomUserId === roomRow.creator_user_id,
           ),
         )
       }
 
+      seenPingIdsRef.current = new Set()
+      lastPingAtRef.current = new Date().toISOString()
+
+      const pollForPings = async () => {
+        if (cancelled || roomIdRef.current !== ridAtStart) return
+        const since = lastPingAtRef.current || new Date(0).toISOString()
+        const { data: pingRows, error: pingErr } = await supabase
+          .from('member_pings')
+          .select('id, to_user_id, from_name, message, created_at')
+          .eq('room_id', ridAtStart)
+          .eq('to_user_id', roomUserId)
+          .gt('created_at', since)
+          .order('created_at', { ascending: true })
+          .limit(24)
+        if (pingErr) return
+        ;(pingRows || []).forEach((row) => handleIncomingPing(row, roomUserId))
+      }
+
       await loadTasks()
       if (cancelled || roomIdRef.current !== ridAtStart) return
+
+      await pollForPings()
+      if (cancelled || roomIdRef.current !== ridAtStart) return
+      pollTimerRef.current = window.setInterval(pollForPings, 5000)
 
       chRef.current = supabase
         .channel(`room-sync:${ridAtStart}`)
@@ -646,14 +703,7 @@ export default function App() {
           },
           (payload) => {
             const row = payload?.new
-            if (!row || !session?.user?.id) return
-            if (row.to_user_id !== session.user.id) return
-            const sender = (row.from_name || '').trim() || 'Someone'
-            const body = (row.message || '').trim() || `${sender} pinged you`
-            showToast(`📣 Ping from ${sender}`, { timeoutMs: 5200 })
-            sendBrowserNotif(`Ping from ${sender}`, body)
-            playChime('ping')
-            if (!document.hasFocus()) setUnread((u) => u + 1)
+            handleIncomingPing(row, roomUserId)
           },
         )
         .subscribe()
@@ -664,6 +714,7 @@ export default function App() {
       const c = chRef.current
       chRef.current = null
       if (c && supabase) supabase.removeChannel(c)
+      if (pollTimerRef.current) window.clearInterval(pollTimerRef.current)
     }
   }, [
     authReady,
@@ -674,8 +725,8 @@ export default function App() {
     loadTasks,
     persistMyName,
     loadMembers,
+    handleIncomingPing,
     showToast,
-    sendBrowserNotif,
     leaveRoom,
   ])
 
@@ -965,7 +1016,22 @@ export default function App() {
     })
     setPingingUserId('')
     if (error) {
-      showToast('Could not send ping')
+      console.error('sendPing', error)
+      const msg = error.message || ''
+      const missingMigration =
+        error.code === '42P01' ||
+        /member_pings/i.test(msg) &&
+          (/does not exist|schema cache|not found|relation/i.test(msg))
+      const rls =
+        error.code === '42501' ||
+        /row-level security|RLS|permission denied|not a member/i.test(msg)
+      if (missingMigration) {
+        showToast('Ping setup missing — run the latest Supabase migration for member pings.')
+      } else if (rls) {
+        showToast('Could not send ping — rejoin this list with your code, then retry.')
+      } else {
+        showToast(`Could not send ping: ${msg || error.code || 'unknown error'}`)
+      }
       return
     }
     pingCooldownRef.current.set(toUserId, now)
