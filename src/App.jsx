@@ -66,7 +66,12 @@ function playChime(type = 'add') {
   try {
     const Ctx = window.AudioContext || window.webkitAudioContext
     const ctx = new Ctx()
-    const notes = type === 'add' ? [523, 659] : [659, 523, 784]
+    const notes =
+      type === 'add'
+        ? [523, 659]
+        : type === 'ping'
+          ? [784, 988, 784]
+          : [659, 523, 784]
     notes.forEach((freq, i) => {
       const osc = ctx.createOscillator()
       const gain = ctx.createGain()
@@ -148,6 +153,7 @@ export default function App() {
   const [assignTo, setAssignTo] = useState([])
   const [toasts, setToasts] = useState([])
   const [bulkBusy, setBulkBusy] = useState(false)
+  const [pingingUserId, setPingingUserId] = useState('')
   const [notifPerm, setNotifPerm] = useState(() =>
     typeof window !== 'undefined' && 'Notification' in window
       ? Notification.permission
@@ -165,6 +171,7 @@ export default function App() {
   const addRef = useRef(null)
   const setupDoneRef = useRef(false)
   const prefsScopeRef = useRef('')
+  const pingCooldownRef = useRef(new Map())
 
   useEffect(() => {
     myNameRef.current = myName
@@ -485,6 +492,8 @@ export default function App() {
     setIsRoomCreator(false)
     setCustomCodeMsg('')
     setListTitleMsg('')
+    setPingingUserId('')
+    pingCooldownRef.current = new Map()
   }, [])
 
   const leaveListFlightRef = useRef(false)
@@ -627,6 +636,26 @@ export default function App() {
             loadMembers(ridAtStart)
           },
         )
+        .on(
+          'postgres_changes',
+          {
+            event: 'INSERT',
+            schema: 'public',
+            table: 'member_pings',
+            filter: `room_id=eq.${ridAtStart}`,
+          },
+          (payload) => {
+            const row = payload?.new
+            if (!row || !session?.user?.id) return
+            if (row.to_user_id !== session.user.id) return
+            const sender = (row.from_name || '').trim() || 'Someone'
+            const body = (row.message || '').trim() || `${sender} pinged you`
+            showToast(`📣 Ping from ${sender}`, { timeoutMs: 5200 })
+            sendBrowserNotif(`Ping from ${sender}`, body)
+            playChime('ping')
+            if (!document.hasFocus()) setUnread((u) => u + 1)
+          },
+        )
         .subscribe()
     })()
 
@@ -646,6 +675,7 @@ export default function App() {
     persistMyName,
     loadMembers,
     showToast,
+    sendBrowserNotif,
     leaveRoom,
   ])
 
@@ -913,6 +943,33 @@ export default function App() {
     } catch {
       showToast(`Code: ${c}`)
     }
+  }
+
+  async function sendPing(toUserId, toName) {
+    if (!supabase || !roomId || !toUserId || !toName) return
+    const fromUserId = session?.user?.id
+    if (!fromUserId || fromUserId === toUserId) return
+    const now = Date.now()
+    const lastAt = pingCooldownRef.current.get(toUserId) || 0
+    if (now - lastAt < 6000) {
+      showToast(`Give ${toName} a moment before pinging again`)
+      return
+    }
+    setPingingUserId(toUserId)
+    const { error } = await supabase.from('member_pings').insert({
+      room_id: roomId,
+      from_user_id: fromUserId,
+      to_user_id: toUserId,
+      from_name: myName,
+      message: `${myName} pinged you`,
+    })
+    setPingingUserId('')
+    if (error) {
+      showToast('Could not send ping')
+      return
+    }
+    pingCooldownRef.current.set(toUserId, now)
+    showToast(`📣 Pinged ${toName}`)
   }
 
   async function handleApplyCustomCode() {
@@ -1497,17 +1554,25 @@ export default function App() {
 
         {membersDetail.length > 0 && (
           <div className="members-bar" aria-label="People on this list">
-            <span className="members-bar-label">On this list</span>
+            <span className="members-bar-label">On this list (tap a person to ping)</span>
             <div className="members-bar-chips">
-              {membersDetail.map((m) => (
-                <span
-                  key={m.userId}
-                  className={`member-chip${m.userId === myUserId ? ' member-chip-me' : ''}`}
-                >
-                  {m.name}
-                  {m.userId === myUserId ? ' (you)' : ''}
-                </span>
-              ))}
+              {membersDetail.map((m) =>
+                m.userId === myUserId ? (
+                  <span key={m.userId} className="member-chip member-chip-me">
+                    {m.name} (you)
+                  </span>
+                ) : (
+                  <button
+                    type="button"
+                    key={m.userId}
+                    className="member-chip pingable"
+                    disabled={pingingUserId === m.userId}
+                    onClick={() => sendPing(m.userId, m.name)}
+                  >
+                    {m.name}
+                  </button>
+                ),
+              )}
             </div>
           </div>
         )}
@@ -1523,7 +1588,7 @@ export default function App() {
         {notifPerm === 'granted' && (
           <div className="notif-bar">
             <span className="notif-granted">
-              🔔 Notifications on — we&apos;ll ping you for adds, completions, and assignments
+              🔔 Notifications on — we&apos;ll ping you for adds, completions, assignments, and member pings
             </span>
           </div>
         )}
