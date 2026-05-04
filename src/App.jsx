@@ -13,6 +13,10 @@ const LS_NAME = 'duo-my-name'
 const LS_FILTER_PREF = 'duo-filter-pref'
 const LS_ASSIGN_PREF = 'duo-assign-pref'
 const UNDO_TOAST_MS = 5200
+const VAPID_PUBLIC_KEY = String(import.meta.env.VITE_VAPID_PUBLIC_KEY || '')
+  .trim()
+  .replace(/^[\u201C\u201D'"`]+|[\u201C\u201D'"`]+$/g, '')
+  .trim()
 const FILTER_OPTIONS = [
   ['all', 'All'],
   ['mine', 'Mine'],
@@ -60,6 +64,15 @@ function encodeAssignees(list) {
 
 function formatAssignees(list) {
   return normalizeAssignees(list).join(', ')
+}
+
+function urlBase64ToUint8Array(value) {
+  const padded = `${value}${'='.repeat((4 - (value.length % 4)) % 4)}`
+  const base64 = padded.replace(/-/g, '+').replace(/_/g, '/')
+  const raw = window.atob(base64)
+  const out = new Uint8Array(raw.length)
+  for (let i = 0; i < raw.length; i++) out[i] = raw.charCodeAt(i)
+  return out
 }
 
 function playChime(type = 'add') {
@@ -174,6 +187,7 @@ export default function App() {
   const pingCooldownRef = useRef(new Map())
   const seenPingIdsRef = useRef(new Set())
   const lastPingAtRef = useRef('')
+  const swRegRef = useRef(null)
 
   useEffect(() => {
     myNameRef.current = myName
@@ -231,6 +245,23 @@ export default function App() {
     return () => window.removeEventListener('focus', onFocus)
   }, [])
 
+  useEffect(() => {
+    if (typeof window === 'undefined' || !('serviceWorker' in navigator)) return
+    let cancelled = false
+    navigator.serviceWorker
+      .register(`${import.meta.env.BASE_URL}sw.js`, { scope: import.meta.env.BASE_URL })
+      .then((reg) => {
+        if (cancelled) return
+        swRegRef.current = reg
+      })
+      .catch((err) => {
+        console.error('service worker registration failed', err)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
   const dismissToast = useCallback((id) => {
     setToasts((t) => t.filter((x) => x.id !== id))
   }, [])
@@ -259,6 +290,51 @@ export default function App() {
       }
     }
   }, [])
+
+  const syncPushSubscription = useCallback(async () => {
+    if (!supabase || !session?.user?.id) return
+    if (notifPerm !== 'granted') return
+    if (!VAPID_PUBLIC_KEY) return
+    if (typeof window === 'undefined') return
+    if (!('serviceWorker' in navigator) || !('PushManager' in window)) return
+    try {
+      const reg = swRegRef.current || (await navigator.serviceWorker.ready)
+      if (!reg) return
+      swRegRef.current = reg
+      let sub = await reg.pushManager.getSubscription()
+      if (!sub) {
+        sub = await reg.pushManager.subscribe({
+          userVisibleOnly: true,
+          applicationServerKey: urlBase64ToUint8Array(VAPID_PUBLIC_KEY),
+        })
+      }
+      const json = sub.toJSON()
+      const p256dh = json?.keys?.p256dh || ''
+      const auth = json?.keys?.auth || ''
+      if (!sub.endpoint || !p256dh || !auth) return
+      const { error } = await supabase.from('push_subscriptions').upsert(
+        {
+          user_id: session.user.id,
+          endpoint: sub.endpoint,
+          p256dh,
+          auth,
+          enabled: true,
+          user_agent: navigator.userAgent || '',
+          updated_at: new Date().toISOString(),
+          last_seen_at: new Date().toISOString(),
+        },
+        { onConflict: 'endpoint' },
+      )
+      if (error) console.error('push_subscriptions upsert', error)
+    } catch (err) {
+      console.error('sync push subscription failed', err)
+    }
+  }, [notifPerm, session?.user?.id, supabase])
+
+  useEffect(() => {
+    if (notifPerm !== 'granted') return
+    void syncPushSubscription()
+  }, [notifPerm, session?.user?.id, syncPushSubscription])
 
   const handleIncomingPing = useCallback(
     (row, targetUserId) => {
@@ -345,6 +421,7 @@ export default function App() {
     if (!('Notification' in window)) return
     const perm = await Notification.requestPermission()
     setNotifPerm(perm)
+    if (perm === 'granted') await syncPushSubscription()
   }
 
   const continueAsGuest = useCallback(async () => {
@@ -1035,6 +1112,18 @@ export default function App() {
       return
     }
     pingCooldownRef.current.set(toUserId, now)
+    void supabase.functions
+      .invoke('send-member-ping-push', {
+        body: {
+          toUserId,
+          roomId,
+          fromName: myName,
+          message: `${myName} pinged you`,
+        },
+      })
+      .then(({ error: pushErr }) => {
+        if (pushErr) console.error('sendPing push invoke', pushErr)
+      })
     showToast(`📣 Pinged ${toName}`)
   }
 

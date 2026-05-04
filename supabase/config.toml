@@ -1,0 +1,2 @@
+[functions.send-member-ping-push]
+verify_jwt = true
