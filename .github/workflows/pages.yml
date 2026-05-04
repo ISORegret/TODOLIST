@@ -32,12 +32,13 @@ jobs:
       - name: Install
         run: npm ci
 
-      - name: Build
-        env:
-          VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
-          VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
-          VITE_USE_RELATIVE_BASE: 'true'
-        run: npm run build
+     - name: Build
+  env:
+    VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
+    VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
+    VITE_VAPID_PUBLIC_KEY: ${{ secrets.VITE_VAPID_PUBLIC_KEY }}
+    VITE_USE_RELATIVE_BASE: 'true'
+  run: npm run build
 
       - uses: actions/upload-pages-artifact@v5
         with:
