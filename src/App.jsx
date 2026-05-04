@@ -90,6 +90,12 @@ export default function App() {
   const [customCodeDraft, setCustomCodeDraft] = useState('')
   const [customCodeBusy, setCustomCodeBusy] = useState(false)
   const [customCodeMsg, setCustomCodeMsg] = useState('')
+  const [roomTitle, setRoomTitle] = useState('')
+  const [newListTitle, setNewListTitle] = useState('')
+  const [listTitleDraft, setListTitleDraft] = useState('')
+  const [listTitleBusy, setListTitleBusy] = useState(false)
+  const [listTitleMsg, setListTitleMsg] = useState('')
+  const [leaveListBusy, setLeaveListBusy] = useState(false)
   const [myName, setMyName] = useState(() => localStorage.getItem(LS_NAME) || '')
   const [nameIn, setNameIn] = useState('')
   const [joinCodeIn, setJoinCodeIn] = useState('')
@@ -262,7 +268,7 @@ export default function App() {
     setMyListsLoading(true)
     const { data, error } = await supabase
       .from('room_members')
-      .select('room_id, display_name, rooms(join_code)')
+      .select('room_id, display_name, rooms(join_code, title)')
       .eq('user_id', user.id)
     setMyListsLoading(false)
     if (error) {
@@ -278,14 +284,26 @@ export default function App() {
             : Array.isArray(rel) && rel[0]
               ? rel[0].join_code
               : ''
+        const listTitle =
+          rel && typeof rel === 'object' && !Array.isArray(rel)
+            ? rel.title
+            : Array.isArray(rel) && rel[0]
+              ? rel[0].title
+              : ''
         return {
           roomId: r.room_id,
           joinCode: joinCode || '',
+          listTitle: typeof listTitle === 'string' ? listTitle : '',
           displayName: (r.display_name || '').trim(),
         }
       })
       .filter((x) => x.roomId && x.joinCode)
-    rows.sort((a, b) => a.joinCode.localeCompare(b.joinCode))
+    rows.sort((a, b) => {
+      const ta = (a.listTitle || '').trim().toLowerCase()
+      const tb = (b.listTitle || '').trim().toLowerCase()
+      if (ta !== tb) return ta.localeCompare(tb)
+      return a.joinCode.localeCompare(b.joinCode)
+    })
     setMyLists(rows)
   }, [supabase])
 
@@ -369,10 +387,13 @@ export default function App() {
 
   const leaveRoom = useCallback(() => {
     setupDoneRef.current = false
+    roomIdRef.current = ''
     localStorage.removeItem(LS_ROOM)
     localStorage.removeItem(LS_JOIN)
     setRoomId('')
     setJoinCodeDisplay('')
+    setRoomTitle('')
+    setNewListTitle('')
     setMembers([])
     setMembersDetail([])
     setTasks([])
@@ -381,7 +402,49 @@ export default function App() {
     setSettingsOpen(false)
     setIsRoomCreator(false)
     setCustomCodeMsg('')
+    setListTitleMsg('')
   }, [])
+
+  const leaveListFlightRef = useRef(false)
+  const confirmLeaveList = useCallback(async () => {
+    if (leaveListFlightRef.current) return
+    if (!supabase || !roomId) {
+      leaveRoom()
+      return
+    }
+    const { data: { user } } = await supabase.auth.getUser()
+    if (!user) {
+      leaveRoom()
+      return
+    }
+    leaveListFlightRef.current = true
+    setLeaveListBusy(true)
+    const rid = roomId
+    let error = null
+    try {
+      const res = await supabase
+        .from('room_members')
+        .delete()
+        .eq('room_id', rid)
+        .eq('user_id', user.id)
+      error = res.error
+    } finally {
+      leaveListFlightRef.current = false
+      setLeaveListBusy(false)
+    }
+    if (error) {
+      console.error('leave list', error)
+      showToast(
+        error.code === '42501' || /row-level security|RLS|permission denied/i.test(error.message || '')
+          ? 'Could not leave — run the latest Supabase migration (room title + leave).'
+          : `Could not leave: ${error.message || 'Unknown error'}`,
+      )
+      return
+    }
+    roomIdRef.current = ''
+    leaveRoom()
+    showToast('You left the list')
+  }, [supabase, roomId, leaveRoom, showToast])
 
   useEffect(() => {
     if (!authReady || !roomId || !supabaseConfigured || setupPhase || !supabase) return
@@ -432,12 +495,15 @@ export default function App() {
 
       const { data: roomRow } = await supabase
         .from('rooms')
-        .select('join_code, creator_user_id')
+        .select('join_code, creator_user_id, title')
         .eq('id', ridAtStart)
         .maybeSingle()
       if (!cancelled && roomIdRef.current === ridAtStart && roomRow?.join_code) {
         setJoinCodeDisplay(roomRow.join_code)
         localStorage.setItem(LS_JOIN, roomRow.join_code)
+      }
+      if (!cancelled && roomIdRef.current === ridAtStart) {
+        setRoomTitle(typeof roomRow?.title === 'string' ? roomRow.title : '')
       }
       const { data: { user: roomUser } } = await supabase.auth.getUser()
       if (!cancelled && roomIdRef.current === ridAtStart) {
@@ -594,6 +660,7 @@ export default function App() {
   async function openExistingList(entry) {
     if (!supabase) return
     setRoomError('')
+    setRoomTitle('')
     const resolved =
       entry.displayName ||
       nameIn.trim() ||
@@ -632,45 +699,58 @@ export default function App() {
     if (!nameIn.trim() || !supabase) return
     setRoomBusy(true)
     setRoomError('')
-    const { data: { session: s } } = await supabase.auth.getSession()
-    if (!s?.user) {
+    try {
+      const { data: { session: s } } = await supabase.auth.getSession()
+      if (!s?.user) {
+        setRoomError('Sign in with email (or continue as guest) before creating a list.')
+        return
+      }
+      const { data, error } = await supabase.rpc('create_room')
+      if (error) {
+        console.error('create_room', error)
+        const hint =
+          /permission denied|function public.create_room|not authenticated/i.test(
+            error.message || '',
+          )
+            ? ' Check that the SQL migration ran and Anonymous sign-in is enabled.'
+            : ''
+        setRoomError((error.message || 'Could not create list') + hint)
+        return
+      }
+      const row = Array.isArray(data) ? data[0] : data
+      const rid = row?.room_id
+      const code = row?.join_code
+      if (!rid || !code) {
+        setRoomError('Unexpected response from server')
+        return
+      }
+      localStorage.setItem(LS_ROOM, rid)
+      localStorage.setItem(LS_JOIN, code)
+      localStorage.setItem(LS_NAME, nameIn.trim())
+      setRoomId(rid)
+      setJoinCodeDisplay(code)
+      setMyName(nameIn.trim())
+      myNameRef.current = nameIn.trim()
+      roomIdRef.current = rid
+      setupDoneRef.current = true
+      setSetupPhase(false)
+      await persistMyName(nameIn.trim())
+      const title = newListTitle.trim()
+      if (title) {
+        const { error: titleErr } = await supabase.rpc('set_room_title', {
+          p_room_id: rid,
+          p_title: title,
+        })
+        if (!titleErr) setRoomTitle(title)
+      } else {
+        setRoomTitle('')
+      }
+      setNewListTitle('')
+      prevTasksRef.current = []
+      setTasks([])
+    } finally {
       setRoomBusy(false)
-      setRoomError('Sign in with email (or continue as guest) before creating a list.')
-      return
     }
-    const { data, error } = await supabase.rpc('create_room')
-    setRoomBusy(false)
-    if (error) {
-      console.error('create_room', error)
-      const hint =
-        /permission denied|function public.create_room|not authenticated/i.test(
-          error.message || '',
-        )
-          ? ' Check that the SQL migration ran and Anonymous sign-in is enabled.'
-          : ''
-      setRoomError((error.message || 'Could not create list') + hint)
-      return
-    }
-    const row = Array.isArray(data) ? data[0] : data
-    const rid = row?.room_id
-    const code = row?.join_code
-    if (!rid || !code) {
-      setRoomError('Unexpected response from server')
-      return
-    }
-    localStorage.setItem(LS_ROOM, rid)
-    localStorage.setItem(LS_JOIN, code)
-    localStorage.setItem(LS_NAME, nameIn.trim())
-    setRoomId(rid)
-    setJoinCodeDisplay(code)
-    setMyName(nameIn.trim())
-    myNameRef.current = nameIn.trim()
-    roomIdRef.current = rid
-    setupDoneRef.current = true
-    setSetupPhase(false)
-    await persistMyName(nameIn.trim())
-    prevTasksRef.current = []
-    setTasks([])
   }
 
   async function handleJoinRoom() {
@@ -691,6 +771,7 @@ export default function App() {
       setRoomError(error.message === 'invalid code' ? 'Invalid code' : error.message)
       return
     }
+    setRoomTitle('')
     const joinedCode = joinCodeIn.trim().toUpperCase()
     localStorage.setItem(LS_ROOM, rid)
     localStorage.setItem(LS_JOIN, joinedCode)
@@ -718,7 +799,27 @@ export default function App() {
   function openListSettings() {
     setCustomCodeDraft(joinCodeDisplay || '')
     setCustomCodeMsg('')
+    setListTitleDraft(roomTitle)
+    setListTitleMsg('')
     setSettingsOpen(true)
+  }
+
+  async function handleSaveListTitle() {
+    if (!supabase || !roomId) return
+    setListTitleBusy(true)
+    setListTitleMsg('')
+    const { error } = await supabase.rpc('set_room_title', {
+      p_room_id: roomId,
+      p_title: listTitleDraft,
+    })
+    setListTitleBusy(false)
+    if (error) {
+      setListTitleMsg(error.message || 'Could not save name')
+      return
+    }
+    const next = listTitleDraft.trim()
+    setRoomTitle(next)
+    setListTitleMsg('Saved.')
   }
 
   async function copyJoinCode() {
@@ -1041,9 +1142,14 @@ export default function App() {
                           className="home-list-open"
                           onClick={() => openExistingList(row)}
                         >
-                          <span className="home-list-code">{row.joinCode}</span>
+                          <span className="home-list-title">
+                            {(row.listTitle || '').trim() || 'Untitled list'}
+                          </span>
+                          <span className="home-list-code-row">
+                            Code <span className="home-list-code-mono">{row.joinCode}</span>
+                          </span>
                           <span className="home-list-as">
-                            {row.displayName ? `as ${row.displayName}` : 'tap to open (set name below if new)'}
+                            {row.displayName ? `You as ${row.displayName}` : 'Tap to open — add your display name below if needed'}
                           </span>
                         </button>
                       </li>
@@ -1066,6 +1172,13 @@ export default function App() {
                   onChange={(e) => setNameIn(e.target.value)}
                   maxLength={24}
                   autoFocus
+                />
+                <input
+                  className="setup-input"
+                  placeholder="List name (optional — only when you tap New list)"
+                  value={newListTitle}
+                  onChange={(e) => setNewListTitle(e.target.value)}
+                  maxLength={48}
                 />
                 <div className="setup-row-btns">
                   <button
@@ -1124,11 +1237,14 @@ export default function App() {
       <div className="app">
         <div className="header">
           <div className="header-top">
-            <div>
+            <div className="header-left-block">
               <div className="header-date">{dateStr()}</div>
               <h1 className="header-title">
                 Today&apos;s <em>list</em>
               </h1>
+              {(roomTitle || '').trim() ? (
+                <p className="header-list-subtitle">{(roomTitle || '').trim()}</p>
+              ) : null}
             </div>
             <div className="header-right">
               <div className="who-badge">
@@ -1137,6 +1253,14 @@ export default function App() {
               </div>
               <button type="button" className="settings-btn" onClick={openListSettings}>
                 List info
+              </button>
+              <button
+                type="button"
+                className="leave-list-btn"
+                disabled={leaveListBusy}
+                onClick={confirmLeaveList}
+              >
+                {leaveListBusy ? 'Leaving…' : 'Leave list'}
               </button>
               <button
                 type="button"
@@ -1157,10 +1281,22 @@ export default function App() {
 
         {joinCodeDisplay ? (
           <div className="room-banner">
-            Share code: <strong>{joinCodeDisplay}</strong>
+            {(roomTitle || '').trim() ? (
+              <>
+                <span className="room-banner-title">{(roomTitle || '').trim()}</span>
+                <span className="room-banner-meta">
+                  {' '}
+                  · Share code: <strong>{joinCodeDisplay}</strong>
+                </span>
+              </>
+            ) : (
+              <>
+                Share code: <strong>{joinCodeDisplay}</strong>
+              </>
+            )}
             <span className="hint">
-              Tap <strong>List info</strong> above to copy or (if you created this list) change the code. Others join
-              with the same code under &quot;Join with code&quot;.
+              Tap <strong>List info</strong> to set a list name, copy the code, or change the code (creator). Others
+              join under &quot;Join with code&quot; on the home screen.
             </span>
           </div>
         ) : (
@@ -1344,17 +1480,17 @@ export default function App() {
           </button>
         </div>
 
-        <p className="footer-hint">
-          Realtime sync ·{' '}
+        <div className="footer-leave-wrap">
           <button
             type="button"
-            className="switch-link"
-            style={{ display: 'inline', fontSize: '10.5px' }}
-            onClick={leaveRoom}
+            className="leave-list-btn leave-list-btn--footer"
+            disabled={leaveListBusy}
+            onClick={confirmLeaveList}
           >
-            leave this list
+            {leaveListBusy ? 'Leaving…' : 'Leave this list'}
           </button>
-        </p>
+          <p className="footer-hint">Realtime sync — you stay in the list until you leave or sign out.</p>
+        </div>
       </div>
 
       {settingsOpen && (
@@ -1378,6 +1514,31 @@ export default function App() {
               </button>
             </div>
             <div className="list-modal-body">
+              <p className="list-modal-label">List name</p>
+              <p className="list-modal-hint">Shown on your home screen and in the header (everyone on the list can edit).</p>
+              <div className="list-modal-code-row list-modal-code-row--stack">
+                <input
+                  className="setup-input"
+                  value={listTitleDraft}
+                  onChange={(e) => {
+                    setListTitleDraft(e.target.value)
+                    setListTitleMsg('')
+                  }}
+                  maxLength={48}
+                  placeholder="e.g. Groceries, Weekend chores"
+                />
+                <button
+                  type="button"
+                  className="setup-go"
+                  disabled={listTitleBusy || !roomId}
+                  onClick={handleSaveListTitle}
+                >
+                  Save name
+                </button>
+              </div>
+              {listTitleMsg && <p className="list-modal-msg">{listTitleMsg}</p>}
+
+              <hr className="list-modal-divider" />
               <p className="list-modal-label">Join code</p>
               <div className="list-modal-code-row">
                 <code className="list-modal-code">{joinCodeDisplay || '—'}</code>
