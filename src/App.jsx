@@ -25,8 +25,31 @@ function genToastId() {
   return Math.random().toString(36).slice(2, 9)
 }
 
-function initLetter(n) {
-  return (n || '?')[0].toUpperCase()
+function normalizeAssignees(value) {
+  if (Array.isArray(value)) {
+    return [...new Set(value.map((n) => (typeof n === 'string' ? n.trim() : '')).filter(Boolean))]
+  }
+  if (typeof value !== 'string') return []
+  const trimmed = value.trim()
+  if (!trimmed) return []
+  if (trimmed.startsWith('[')) {
+    try {
+      const parsed = JSON.parse(trimmed)
+      if (Array.isArray(parsed)) return normalizeAssignees(parsed)
+    } catch {
+      /* ignore */
+    }
+  }
+  return [trimmed]
+}
+
+function encodeAssignees(list) {
+  const clean = normalizeAssignees(list)
+  return clean.length ? JSON.stringify(clean) : null
+}
+
+function formatAssignees(list) {
+  return normalizeAssignees(list).join(', ')
 }
 
 function playChime(type = 'add') {
@@ -57,7 +80,7 @@ function mapRow(row) {
     id: row.id,
     text: row.text,
     by: row.created_by,
-    assignedTo: row.assigned_to || null,
+    assignedTo: normalizeAssignees(row.assigned_to),
     done: row.done,
     doneBy: row.done_by || null,
     at: new Date(row.created_at).getTime(),
@@ -112,7 +135,7 @@ export default function App() {
   const [tasks, setTasks] = useState([])
   const [filter, setFilter] = useState('all')
   const [addIn, setAddIn] = useState('')
-  const [assignTo, setAssignTo] = useState('')
+  const [assignTo, setAssignTo] = useState([])
   const [toasts, setToasts] = useState([])
   const [notifPerm, setNotifPerm] = useState(() =>
     typeof window !== 'undefined' && 'Notification' in window
@@ -176,7 +199,7 @@ export default function App() {
 
         if (!prevIds.has(t.id)) {
           freshIds.add(t.id)
-          const assignHint = t.assignedTo ? ` → ${t.assignedTo}` : ''
+          const assignHint = t.assignedTo.length ? ` → ${formatAssignees(t.assignedTo)}` : ''
           const msg = `📋 ${t.by} added: "${t.text}"${assignHint}`
           showToast(msg)
           sendBrowserNotif(`${t.by} added a task`, t.text)
@@ -196,11 +219,7 @@ export default function App() {
           if (!document.hasFocus()) setUnread((u) => u + 1)
         }
 
-        if (
-          old.assignedTo !== t.assignedTo &&
-          t.assignedTo === me &&
-          t.by !== me
-        ) {
+        if (!old.assignedTo.includes(me) && t.assignedTo.includes(me) && t.by !== me) {
           showToast(`👤 ${t.by} assigned you: "${t.text}"`)
           sendBrowserNotif('Task assigned to you', t.text)
           playChime('add')
@@ -855,7 +874,7 @@ export default function App() {
 
   async function addTask() {
     if (!addIn.trim() || !roomId || !supabase) return
-    const assigned = assignTo.trim() || null
+    const assigned = encodeAssignees(assignTo)
     const row = {
       room_id: roomId,
       text: addIn.trim(),
@@ -878,6 +897,7 @@ export default function App() {
       return
     }
     setAddIn('')
+    setAssignTo([])
     addRef.current?.focus()
     await loadTasks()
   }
@@ -898,9 +918,9 @@ export default function App() {
     await loadTasks()
   }
 
-  async function updateAssigned(id, value) {
+  async function updateAssigned(id, values) {
     if (!supabase) return
-    const assigned = value === '' || value === '__anyone' ? null : value
+    const assigned = encodeAssignees(values)
     const { error } = await supabase
       .from('tasks')
       .update({ assigned_to: assigned, updated_at: new Date().toISOString() })
@@ -910,6 +930,14 @@ export default function App() {
       return
     }
     await loadTasks()
+  }
+
+  async function toggleTaskAssignee(id, name) {
+    const t = tasks.find((x) => x.id === id)
+    if (!t) return
+    const hasName = t.assignedTo.includes(name)
+    const next = hasName ? t.assignedTo.filter((x) => x !== name) : [...t.assignedTo, name]
+    await updateAssigned(id, next)
   }
 
   async function delTask(id) {
@@ -935,7 +963,7 @@ export default function App() {
   const vis = tasks.filter((t) => {
     if (filter === 'done') return t.done
     if (filter === 'mine') return t.by === myName && !t.done
-    if (filter === 'forme') return t.assignedTo === myName && !t.done
+    if (filter === 'forme') return t.assignedTo.includes(myName) && !t.done
     return !t.done
   })
 
@@ -1248,7 +1276,6 @@ export default function App() {
             </div>
             <div className="header-right">
               <div className="who-badge">
-                <div className="who-dot">{initLetter(myName)}</div>
                 <span className="who-name">{myName}</span>
               </div>
               <button type="button" className="settings-btn" onClick={openListSettings}>
@@ -1314,7 +1341,6 @@ export default function App() {
                   key={m.userId}
                   className={`member-chip${m.userId === myUserId ? ' member-chip-me' : ''}`}
                 >
-                  <span className="member-chip-dot">{initLetter(m.name)}</span>
                   {m.name}
                   {m.userId === myUserId ? ' (you)' : ''}
                 </span>
@@ -1385,25 +1411,31 @@ export default function App() {
                 <div className="task-text">{t.text}</div>
                 <div className="task-meta">
                   <span className={`chip ${isMe(t.by) ? 'chip-me' : 'chip-cw'}`}>
-                    {initLetter(t.by)} {t.by}
+                    {t.by}
                   </span>
-                  {t.assignedTo && (
-                    <span className="chip chip-assign">→ {t.assignedTo}</span>
+                  {t.assignedTo.length > 0 && (
+                    <span className="chip chip-assign">→ {formatAssignees(t.assignedTo)}</span>
                   )}
                 </div>
-                <select
-                  className="task-assign-select"
-                  aria-label="Assign to"
-                  value={t.assignedTo || '__anyone'}
-                  onChange={(e) => updateAssigned(t.id, e.target.value)}
-                >
-                  <option value="__anyone">Anyone</option>
+                <div className="task-assign-picker" aria-label="Assign task">
+                  <button
+                    type="button"
+                    className={`task-assign-chip${t.assignedTo.length === 0 ? ' active' : ''}`}
+                    onClick={() => updateAssigned(t.id, [])}
+                  >
+                    Anyone
+                  </button>
                   {uniqueAssign.map((m) => (
-                    <option key={m} value={m}>
+                    <button
+                      key={m}
+                      type="button"
+                      className={`task-assign-chip${t.assignedTo.includes(m) ? ' active' : ''}`}
+                      onClick={() => toggleTaskAssignee(t.id, m)}
+                    >
                       {m}
-                    </option>
+                    </button>
                   ))}
-                </select>
+                </div>
               </div>
               {isMe(t.by) && (
                 <button type="button" className="task-del" onClick={() => delTask(t.id)}>
@@ -1429,10 +1461,10 @@ export default function App() {
                     <div className="task-text done">{t.text}</div>
                     <div className="task-meta">
                       <span className={`chip ${isMe(t.by) ? 'chip-me' : 'chip-cw'}`}>
-                        {initLetter(t.by)} {t.by}
+                        {t.by}
                       </span>
-                      {t.assignedTo && (
-                        <span className="chip chip-assign">→ {t.assignedTo}</span>
+                      {t.assignedTo.length > 0 && (
+                        <span className="chip chip-assign">→ {formatAssignees(t.assignedTo)}</span>
                       )}
                       <span
                         className={`chip ${isMe(t.doneBy) ? 'chip-done-me' : 'chip-done-cw'}`}
@@ -1462,19 +1494,29 @@ export default function App() {
             placeholder="Add a task…"
             maxLength={200}
           />
-          <select
-            className="add-assign"
-            aria-label="Assign new task"
-            value={assignTo}
-            onChange={(e) => setAssignTo(e.target.value)}
-          >
-            <option value="">Anyone</option>
+          <div className="add-assign-picker" aria-label="Assign new task">
+            <button
+              type="button"
+              className={`add-assign-chip${assignTo.length === 0 ? ' active' : ''}`}
+              onClick={() => setAssignTo([])}
+            >
+              Anyone
+            </button>
             {uniqueAssign.map((m) => (
-              <option key={m} value={m}>
-                → {m}
-              </option>
+              <button
+                key={m}
+                type="button"
+                className={`add-assign-chip${assignTo.includes(m) ? ' active' : ''}`}
+                onClick={() =>
+                  setAssignTo((prev) =>
+                    prev.includes(m) ? prev.filter((x) => x !== m) : [...prev, m],
+                  )
+                }
+              >
+                {m}
+              </button>
             ))}
-          </select>
+          </div>
           <button type="button" className="add-btn" onClick={addTask}>
             +
           </button>
