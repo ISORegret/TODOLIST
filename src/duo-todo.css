@@ -634,6 +634,19 @@ body {
   border-radius: 999px;
   padding: 4px 10px;
 }
+.member-chip.pingable {
+  cursor: pointer;
+  transition: border-color 0.18s, color 0.18s, background 0.18s;
+}
+.member-chip.pingable:hover {
+  border-color: #4c6a87;
+  color: #d8ebfb;
+  background: #1b232b;
+}
+.member-chip.pingable:disabled {
+  opacity: 0.55;
+  cursor: wait;
+}
 
 .member-chip-me {
   border-color: #3a4a38;
