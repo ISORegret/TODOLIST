@@ -259,17 +259,17 @@ body {
 
 .task-item {
   display:flex; align-items:flex-start; gap:11px;
-  background:#131313; border:1px solid #1C1C1C; border-radius:13px;
+  background:#1A1A1A; border:1px solid #3A3A3A; border-radius:13px;
   padding:13px 14px; transition:all 0.2s; animation:slideIn 0.22s ease;
 }
-.task-item:hover { border-color:#252525; background:#151515; }
-.task-item.done { opacity:0.4; }
+.task-item:hover { border-color:#5A5A5A; background:#202020; }
+.task-item.done { opacity:0.68; border-color:#4A4A4A; background:#181818; }
 .task-item.flash { animation:flashNew 0.6s ease; }
 @keyframes slideIn { from{opacity:0;transform:translateY(8px)} to{opacity:1;transform:translateY(0)} }
-@keyframes flashNew { 0%{border-color:#A8C5A0;background:#162016} 100%{border-color:#1C1C1C;background:#131313} }
+@keyframes flashNew { 0%{border-color:#A8C5A0;background:#162016} 100%{border-color:#3A3A3A;background:#1A1A1A} }
 
 .check-btn {
-  width:21px; height:21px; border-radius:6px; border:1.5px solid #252525;
+  width:21px; height:21px; border-radius:6px; border:1.5px solid #4A4A4A;
   background:transparent; cursor:pointer; flex-shrink:0; margin-top:1px;
   display:flex; align-items:center; justify-content:center;
   font-size:11px; font-weight:700; color:#0F0F0F; transition:all 0.18s;
@@ -294,8 +294,8 @@ body {
   margin-top: 8px;
   width: 100%;
   max-width: 200px;
-  background: #1A1A1A;
-  border: 1px solid #2A2A2A;
+  background: #171717;
+  border: 1px solid #3A3A3A;
   border-radius: 8px;
   padding: 6px 8px;
   font-family: 'Outfit', sans-serif;
@@ -313,14 +313,14 @@ body {
 .add-row { display:flex; gap:8px; margin-top:14px; flex-wrap: wrap; align-items: stretch; }
 .add-input {
   flex:1; min-width: 140px;
-  background:#131313; border:1.5px solid #1E1E1E; border-radius:13px;
+  background:#171717; border:1.5px solid #3A3A3A; border-radius:13px;
   padding:12px 15px; font-family:'Outfit',sans-serif; font-size:14px;
   color:#F5F0E8; outline:none; transition:border-color 0.2s;
 }
 .add-input::placeholder { color:#282828; }
-.add-input:focus { border-color:#2A2A2A; }
+.add-input:focus { border-color:#6A6A6A; }
 .add-assign {
-  background:#131313; border:1.5px solid #1E1E1E; border-radius:13px;
+  background:#171717; border:1.5px solid #3A3A3A; border-radius:13px;
   padding:8px 10px; font-family:'Outfit',sans-serif; font-size:12px;
   color:#C8C0B8; min-width: 100px;
 }
