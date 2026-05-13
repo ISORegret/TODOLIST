@@ -191,6 +191,18 @@ function hasRecoverySignal() {
   return /type=recovery/i.test(hash)
 }
 
+function pullStartBlockedTarget(target) {
+  if (!target || typeof target !== 'object') return false
+  const el = target
+  const tag = String(el.tagName || '').toLowerCase()
+  if (['input', 'textarea', 'select', 'button', 'label'].includes(tag)) return true
+  if (typeof el.closest === 'function') {
+    if (el.closest('.list-modal-root')) return true
+    if (el.closest('.task-edit-row')) return true
+  }
+  return false
+}
+
 export default function App() {
   const [session, setSession] = useState(null)
   const [authReady, setAuthReady] = useState(false)
@@ -259,6 +271,8 @@ export default function App() {
   const [notifActionMsg, setNotifActionMsg] = useState('')
   const [unread, setUnread] = useState(0)
   const [newIds, setNewIds] = useState(() => new Set())
+  const [pullDistance, setPullDistance] = useState(0)
+  const [pullRefreshing, setPullRefreshing] = useState(false)
   /** Rooms the current user belongs to (home screen) */
   const [myLists, setMyLists] = useState([])
   const [myListsLoading, setMyListsLoading] = useState(false)
@@ -274,6 +288,9 @@ export default function App() {
   const lastPingAtRef = useRef('')
   const swRegRef = useRef(null)
   const hasLoadedInitialTasksRef = useRef(false)
+  const pullStartYRef = useRef(0)
+  const pullTrackingRef = useRef(false)
+  const pullDistanceRef = useRef(0)
 
   useEffect(() => {
     myNameRef.current = myName
@@ -733,6 +750,70 @@ export default function App() {
     })
   }, [handleDiff])
 
+  const refreshCurrentList = useCallback(async () => {
+    if (!roomIdRef.current || !supabase || pullRefreshing) return
+    setPullRefreshing(true)
+    try {
+      const rid = roomIdRef.current
+      await Promise.all([loadMembers(rid), loadTasks({ suppressDiff: true })])
+      showToast('List refreshed')
+    } finally {
+      setPullRefreshing(false)
+      setPullDistance(0)
+      pullDistanceRef.current = 0
+    }
+  }, [loadMembers, loadTasks, pullRefreshing, showToast, supabase])
+
+  const handlePullStart = useCallback((ev) => {
+    if (!roomId || setupPhase || settingsOpen || imageViewerSrc || pullRefreshing) return
+    if (window.scrollY > 0) return
+    if (pullStartBlockedTarget(ev.target)) return
+    const touch = ev.touches?.[0]
+    if (!touch) return
+    pullTrackingRef.current = true
+    pullStartYRef.current = touch.clientY
+    pullDistanceRef.current = 0
+    setPullDistance(0)
+  }, [imageViewerSrc, pullRefreshing, roomId, settingsOpen, setupPhase])
+
+  const handlePullMove = useCallback((ev) => {
+    if (!pullTrackingRef.current) return
+    const touch = ev.touches?.[0]
+    if (!touch) return
+    const delta = touch.clientY - pullStartYRef.current
+    if (delta <= 0) {
+      pullDistanceRef.current = 0
+      setPullDistance(0)
+      return
+    }
+    if (window.scrollY > 0) {
+      pullTrackingRef.current = false
+      pullDistanceRef.current = 0
+      setPullDistance(0)
+      return
+    }
+    const next = Math.min(110, delta * 0.55)
+    pullDistanceRef.current = next
+    setPullDistance(next)
+    ev.preventDefault()
+  }, [])
+
+  const handlePullEnd = useCallback(() => {
+    if (!pullTrackingRef.current) {
+      pullDistanceRef.current = 0
+      setPullDistance(0)
+      return
+    }
+    pullTrackingRef.current = false
+    const distance = pullDistanceRef.current || 0
+    if (distance >= 68) {
+      void refreshCurrentList()
+      return
+    }
+    pullDistanceRef.current = 0
+    setPullDistance(0)
+  }, [refreshCurrentList])
+
   const persistMyName = useCallback(
     async (name) => {
       if (!supabase) return
@@ -769,8 +850,12 @@ export default function App() {
     setEditTaskText('')
     setEditTaskBusy(false)
     setImageViewerSrc('')
+    setPullDistance(0)
+    setPullRefreshing(false)
     prevTasksRef.current = []
     hasLoadedInitialTasksRef.current = false
+    pullTrackingRef.current = false
+    pullDistanceRef.current = 0
     setSetupPhase(false)
     setSettingsOpen(false)
     setIsRoomCreator(false)
@@ -2066,7 +2151,28 @@ export default function App() {
         ))}
       </div>
 
-      <div className="app">
+      <div
+        className="app"
+        onTouchStart={handlePullStart}
+        onTouchMove={handlePullMove}
+        onTouchEnd={handlePullEnd}
+        onTouchCancel={handlePullEnd}
+      >
+        <div
+          className={`pull-refresh-indicator${pullDistance > 0 || pullRefreshing ? ' active' : ''}${
+            pullRefreshing ? ' refreshing' : ''
+          }`}
+          style={{ height: `${pullRefreshing ? 52 : Math.round(pullDistance)}px` }}
+          aria-live="polite"
+        >
+          <span>
+            {pullRefreshing
+              ? 'Refreshing…'
+              : pullDistance >= 68
+                ? 'Release to refresh'
+                : 'Pull down to refresh'}
+          </span>
+        </div>
         <div className="header">
           <div className="header-top">
             <div className="header-left-block">
