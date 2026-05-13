@@ -13,6 +13,8 @@ const LS_NAME = 'duo-my-name'
 const LS_FILTER_PREF = 'duo-filter-pref'
 const LS_ASSIGN_PREF = 'duo-assign-pref'
 const UNDO_TOAST_MS = 5200
+const TASK_IMAGE_MAX_DIM = 1280
+const TASK_IMAGE_MAX_BYTES = 650 * 1024
 const VAPID_PUBLIC_KEY = String(import.meta.env.VITE_VAPID_PUBLIC_KEY || '')
   .trim()
   .replace(/^[\u201C\u201D'"`]+|[\u201C\u201D'"`]+$/g, '')
@@ -103,11 +105,60 @@ function playChime(type = 'add') {
   }
 }
 
+function estimateDataUrlBytes(dataUrl) {
+  const base64 = String(dataUrl || '').split(',')[1] || ''
+  return Math.ceil((base64.length * 3) / 4)
+}
+
+function readFileAsDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => resolve(String(reader.result || ''))
+    reader.onerror = () => reject(new Error('Could not read image file'))
+    reader.readAsDataURL(file)
+  })
+}
+
+function readImage(dataUrl) {
+  return new Promise((resolve, reject) => {
+    const img = new Image()
+    img.onload = () => resolve(img)
+    img.onerror = () => reject(new Error('Could not decode image'))
+    img.src = dataUrl
+  })
+}
+
+async function optimizeTaskImageFile(file) {
+  if (!file || typeof file !== 'object') throw new Error('Choose an image first.')
+  if (!String(file.type || '').startsWith('image/')) {
+    throw new Error('Please choose an image file.')
+  }
+  const sourceUrl = await readFileAsDataUrl(file)
+  const img = await readImage(sourceUrl)
+  const largestSide = Math.max(img.width || 0, img.height || 0) || 1
+  const scale = Math.min(1, TASK_IMAGE_MAX_DIM / largestSide)
+  const width = Math.max(1, Math.round((img.width || 1) * scale))
+  const height = Math.max(1, Math.round((img.height || 1) * scale))
+  const canvas = document.createElement('canvas')
+  canvas.width = width
+  canvas.height = height
+  const ctx = canvas.getContext('2d')
+  if (!ctx) throw new Error('Could not process image')
+  ctx.drawImage(img, 0, 0, width, height)
+  const qualitySteps = [0.88, 0.8, 0.72, 0.64, 0.56]
+  for (const quality of qualitySteps) {
+    const out = canvas.toDataURL('image/jpeg', quality)
+    if (estimateDataUrlBytes(out) <= TASK_IMAGE_MAX_BYTES) return out
+  }
+  throw new Error('Image is too large. Try a smaller photo.')
+}
+
 function mapRow(row) {
   return {
     id: row.id,
     text: row.text,
     by: row.created_by,
+    imageData: row.image_data || '',
     assignedTo: normalizeAssignees(row.assigned_to),
     done: row.done,
     doneBy: row.done_by || null,
@@ -189,6 +240,12 @@ export default function App() {
   const [tasks, setTasks] = useState([])
   const [filter, setFilter] = useState('all')
   const [addIn, setAddIn] = useState('')
+  const [addImageData, setAddImageData] = useState('')
+  const [addImageName, setAddImageName] = useState('')
+  const [editTaskId, setEditTaskId] = useState('')
+  const [editTaskText, setEditTaskText] = useState('')
+  const [editTaskBusy, setEditTaskBusy] = useState(false)
+  const [imageViewerSrc, setImageViewerSrc] = useState('')
   const [assignTo, setAssignTo] = useState([])
   const [toasts, setToasts] = useState([])
   const [bulkBusy, setBulkBusy] = useState(false)
@@ -706,6 +763,12 @@ export default function App() {
     setMembers([])
     setMembersDetail([])
     setTasks([])
+    setAddImageData('')
+    setAddImageName('')
+    setEditTaskId('')
+    setEditTaskText('')
+    setEditTaskBusy(false)
+    setImageViewerSrc('')
     prevTasksRef.current = []
     hasLoadedInitialTasksRef.current = false
     setSetupPhase(false)
@@ -1380,6 +1443,25 @@ export default function App() {
     setCustomCodeDraft(code)
   }
 
+  async function handlePickTaskImage(ev) {
+    const file = ev?.target?.files?.[0]
+    if (ev?.target) ev.target.value = ''
+    if (!file) return
+    try {
+      const dataUrl = await optimizeTaskImageFile(file)
+      setAddImageData(dataUrl)
+      setAddImageName(String(file.name || 'Attached image').trim() || 'Attached image')
+    } catch (err) {
+      const msg = err && typeof err === 'object' && 'message' in err ? String(err.message || '') : ''
+      showToast(msg || 'Could not attach image')
+    }
+  }
+
+  function removeTaskImageAttachment() {
+    setAddImageData('')
+    setAddImageName('')
+  }
+
   async function addTask() {
     if (!addIn.trim() || !roomId || !supabase) return
     const assigned = encodeAssignees(assignTo)
@@ -1387,6 +1469,7 @@ export default function App() {
       room_id: roomId,
       text: addIn.trim(),
       created_by: myName,
+      image_data: addImageData || null,
       assigned_to: assigned,
       done: false,
       done_by: null,
@@ -1397,16 +1480,58 @@ export default function App() {
       const rls =
         error.code === '42501' ||
         /row-level security|RLS|permission denied/i.test(error.message || '')
+      const missingImageColumn =
+        error.code === '42703' ||
+        /image_data/i.test(error.message || '') &&
+          (/column|schema cache|does not exist/i.test(error.message || ''))
       showToast(
-        rls
-          ? 'Not allowed to add tasks here — join the list again with your room code (session changed).'
-          : `Could not add task: ${error.message || error.code || 'unknown error'}`,
+        missingImageColumn
+          ? 'Image attachments need the latest Supabase migration for tasks.'
+          : rls
+            ? 'Not allowed to add tasks here — join the list again with your room code (session changed).'
+            : `Could not add task: ${error.message || error.code || 'unknown error'}`,
       )
       return
     }
     setAddIn('')
+    removeTaskImageAttachment()
     addRef.current?.focus()
     await loadTasks()
+  }
+
+  function beginEditTask(task) {
+    if (!task || !isMe(task.by)) return
+    setEditTaskId(task.id)
+    setEditTaskText(task.text || '')
+  }
+
+  function cancelEditTask() {
+    if (editTaskBusy) return
+    setEditTaskId('')
+    setEditTaskText('')
+  }
+
+  async function saveTaskEdit(id) {
+    if (!supabase || !id || editTaskBusy) return
+    const nextText = editTaskText.trim()
+    if (!nextText) {
+      showToast('Task text cannot be empty')
+      return
+    }
+    setEditTaskBusy(true)
+    const { error } = await supabase
+      .from('tasks')
+      .update({ text: nextText, updated_at: new Date().toISOString() })
+      .eq('id', id)
+    setEditTaskBusy(false)
+    if (error) {
+      showToast('Could not save task text')
+      return
+    }
+    setEditTaskId('')
+    setEditTaskText('')
+    await loadTasks()
+    showToast('Task updated')
   }
 
   async function setTaskDone(id, nextDone, doneBy = null) {
@@ -1480,6 +1605,7 @@ export default function App() {
           room_id: roomId,
           text: t.text,
           created_by: t.by,
+          image_data: t.imageData || null,
           assigned_to: encodeAssignees(t.assignedTo),
           done: t.done,
           done_by: t.doneBy || null,
@@ -2115,13 +2241,66 @@ export default function App() {
             <div key={t.id} className={`task-item${newIds.has(t.id) ? ' flash' : ''}`}>
               <button type="button" className="check-btn" onClick={() => toggleDone(t.id)} />
               <div className="task-body">
-                <div className="task-text">{t.text}</div>
+                {editTaskId === t.id ? (
+                  <div className="task-edit-row">
+                    <input
+                      className="task-edit-input"
+                      value={editTaskText}
+                      onChange={(e) => setEditTaskText(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') void saveTaskEdit(t.id)
+                        if (e.key === 'Escape') cancelEditTask()
+                      }}
+                      maxLength={200}
+                      autoFocus
+                    />
+                    <div className="task-edit-actions">
+                      <button
+                        type="button"
+                        className="task-inline-action primary"
+                        disabled={editTaskBusy}
+                        onClick={() => saveTaskEdit(t.id)}
+                      >
+                        {editTaskBusy ? 'Saving…' : 'Save'}
+                      </button>
+                      <button
+                        type="button"
+                        className="task-inline-action"
+                        disabled={editTaskBusy}
+                        onClick={cancelEditTask}
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="task-text">{t.text}</div>
+                )}
+                {t.imageData ? (
+                  <button
+                    type="button"
+                    className="task-image-thumb"
+                    aria-label="Open attached image"
+                    onClick={() => setImageViewerSrc(t.imageData)}
+                  >
+                    <img src={t.imageData} alt={`Image attached to ${t.text}`} loading="lazy" />
+                  </button>
+                ) : null}
                 <div className="task-meta">
                   <span className={`chip ${isMe(t.by) ? 'chip-me' : 'chip-cw'}`}>
                     {t.by}
                   </span>
                   {t.assignedTo.length > 0 && (
                     <span className="chip chip-assign">→ {formatAssignees(t.assignedTo)}</span>
+                  )}
+                  {isMe(t.by) && editTaskId !== t.id && (
+                    <button
+                      type="button"
+                      className="task-inline-action"
+                      onClick={() => beginEditTask(t)}
+                    >
+                      Edit
+                    </button>
                   )}
                 </div>
                 <div className="task-assign-picker" aria-label="Assign task">
@@ -2145,7 +2324,12 @@ export default function App() {
                 </div>
               </div>
               {isMe(t.by) && (
-                <button type="button" className="task-del" onClick={() => delTask(t.id)}>
+                <button
+                  type="button"
+                  className="task-del"
+                  aria-label="Delete task"
+                  onClick={() => delTask(t.id)}
+                >
                   ×
                 </button>
               )}
@@ -2165,7 +2349,51 @@ export default function App() {
                     ✓
                   </button>
                   <div className="task-body">
-                    <div className="task-text done">{t.text}</div>
+                    {editTaskId === t.id ? (
+                      <div className="task-edit-row">
+                        <input
+                          className="task-edit-input"
+                          value={editTaskText}
+                          onChange={(e) => setEditTaskText(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter') void saveTaskEdit(t.id)
+                            if (e.key === 'Escape') cancelEditTask()
+                          }}
+                          maxLength={200}
+                          autoFocus
+                        />
+                        <div className="task-edit-actions">
+                          <button
+                            type="button"
+                            className="task-inline-action primary"
+                            disabled={editTaskBusy}
+                            onClick={() => saveTaskEdit(t.id)}
+                          >
+                            {editTaskBusy ? 'Saving…' : 'Save'}
+                          </button>
+                          <button
+                            type="button"
+                            className="task-inline-action"
+                            disabled={editTaskBusy}
+                            onClick={cancelEditTask}
+                          >
+                            Cancel
+                          </button>
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="task-text done">{t.text}</div>
+                    )}
+                    {t.imageData ? (
+                      <button
+                        type="button"
+                        className="task-image-thumb"
+                        aria-label="Open attached image"
+                        onClick={() => setImageViewerSrc(t.imageData)}
+                      >
+                        <img src={t.imageData} alt={`Image attached to ${t.text}`} loading="lazy" />
+                      </button>
+                    ) : null}
                     <div className="task-meta">
                       <span className={`chip ${isMe(t.by) ? 'chip-me' : 'chip-cw'}`}>
                         {t.by}
@@ -2178,10 +2406,24 @@ export default function App() {
                       >
                         ✓ {t.doneBy}
                       </span>
+                      {isMe(t.by) && editTaskId !== t.id && (
+                        <button
+                          type="button"
+                          className="task-inline-action"
+                          onClick={() => beginEditTask(t)}
+                        >
+                          Edit
+                        </button>
+                      )}
                     </div>
                   </div>
                   {isMe(t.by) && (
-                    <button type="button" className="task-del" onClick={() => delTask(t.id)}>
+                    <button
+                      type="button"
+                      className="task-del"
+                      aria-label="Delete task"
+                      onClick={() => delTask(t.id)}
+                    >
                       ×
                     </button>
                   )}
@@ -2229,6 +2471,35 @@ export default function App() {
               +
             </button>
           </div>
+          <div className="add-attachment-row">
+            <label htmlFor="task-image-input" className="add-attach-btn">
+              {addImageData ? 'Change photo' : 'Add photo'}
+            </label>
+            <input
+              id="task-image-input"
+              className="visually-hidden-file"
+              type="file"
+              accept="image/*"
+              onChange={handlePickTaskImage}
+            />
+            {addImageData ? (
+              <>
+                <button
+                  type="button"
+                  className="add-photo-pill"
+                  onClick={() => setImageViewerSrc(addImageData)}
+                >
+                  <img src={addImageData} alt={addImageName || 'Attached image'} loading="lazy" />
+                  <span>{addImageName || 'Attached image'}</span>
+                </button>
+                <button type="button" className="add-photo-remove" onClick={removeTaskImageAttachment}>
+                  Remove
+                </button>
+              </>
+            ) : (
+              <span className="add-attachment-hint">Optional image attachment</span>
+            )}
+          </div>
         </div>
 
         <div className="footer-leave-wrap">
@@ -2243,6 +2514,28 @@ export default function App() {
           <p className="footer-hint">Realtime sync — you stay in the list until you leave or sign out.</p>
         </div>
       </div>
+
+      {imageViewerSrc && (
+        <div className="image-viewer-root" role="dialog" aria-modal="true" aria-label="Image preview">
+          <button
+            type="button"
+            className="image-viewer-backdrop"
+            aria-label="Close image preview"
+            onClick={() => setImageViewerSrc('')}
+          />
+          <div className="image-viewer-panel">
+            <button
+              type="button"
+              className="image-viewer-close"
+              aria-label="Close image preview"
+              onClick={() => setImageViewerSrc('')}
+            >
+              ×
+            </button>
+            <img src={imageViewerSrc} alt="Task attachment preview" className="image-viewer-img" />
+          </div>
+        </div>
+      )}
 
       {settingsOpen && (
         <div className="list-modal-root" role="dialog" aria-modal="true" aria-label="List settings">
