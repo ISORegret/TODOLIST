@@ -216,6 +216,7 @@ export default function App() {
   const seenPingIdsRef = useRef(new Set())
   const lastPingAtRef = useRef('')
   const swRegRef = useRef(null)
+  const hasLoadedInitialTasksRef = useRef(false)
 
   useEffect(() => {
     myNameRef.current = myName
@@ -656,7 +657,7 @@ export default function App() {
     }
   }, [supabase])
 
-  const loadTasks = useCallback(async () => {
+  const loadTasks = useCallback(async ({ suppressDiff = false } = {}) => {
     const rid = roomIdRef.current
     if (!rid || !supabaseConfigured || !supabase) return
     const { data, error } = await supabase
@@ -667,8 +668,10 @@ export default function App() {
     if (error) return
     const next = (data || []).map(mapRow)
     setTasks(() => {
-      handleDiff(prevTasksRef.current, next, myNameRef.current)
+      const shouldDiff = !suppressDiff && hasLoadedInitialTasksRef.current
+      if (shouldDiff) handleDiff(prevTasksRef.current, next, myNameRef.current)
       prevTasksRef.current = next
+      hasLoadedInitialTasksRef.current = true
       return next
     })
   }, [handleDiff])
@@ -704,6 +707,7 @@ export default function App() {
     setMembersDetail([])
     setTasks([])
     prevTasksRef.current = []
+    hasLoadedInitialTasksRef.current = false
     setSetupPhase(false)
     setSettingsOpen(false)
     setIsRoomCreator(false)
@@ -765,6 +769,7 @@ export default function App() {
     if (!authReady || !roomId || !supabaseConfigured || setupPhase || !supabase) return
     const ridAtStart = roomId
     setupDoneRef.current = Boolean(myName.trim())
+    hasLoadedInitialTasksRef.current = false
     const chRef = { current: null }
     const pollTimerRef = { current: null }
     let cancelled = false
@@ -853,7 +858,7 @@ export default function App() {
         ;(pingRows || []).forEach((row) => handleIncomingPing(row, roomUserId))
       }
 
-      await loadTasks()
+      await loadTasks({ suppressDiff: true })
       if (cancelled || roomIdRef.current !== ridAtStart) return
 
       await pollForPings()
