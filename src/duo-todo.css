@@ -333,6 +333,23 @@ body {
 .task-body { flex:1; min-width:0; }
 .task-text { font-size:14px; font-weight:400; color:#C8C0B8; line-height:1.5; word-break:break-word; }
 .task-text.done { text-decoration:line-through; color:#938A81; }
+.task-image-thumb {
+  margin-top: 8px;
+  border: 1px solid #343434;
+  border-radius: 10px;
+  background: #121212;
+  padding: 0;
+  width: 78px;
+  height: 78px;
+  overflow: hidden;
+  cursor: zoom-in;
+}
+.task-image-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
 
 .task-meta { display:flex; align-items:center; gap:6px; margin-top:5px; flex-wrap:wrap; }
 .chip { display:flex; align-items:center; gap:3px; font-size:10px; font-weight:500; letter-spacing:0.04em; padding:2px 7px; border-radius:20px; }
@@ -341,6 +358,50 @@ body {
 .chip-done-me { background:rgba(168,197,160,0.12); color:#A8C5A0; }
 .chip-done-cw { background:rgba(196,168,130,0.12); color:#C4A882; }
 .chip-assign { background: rgba(120, 160, 200, 0.12); color: #8CB4D4; }
+.task-inline-action {
+  border: 1px solid #3a3a3a;
+  background: #171717;
+  color: #9f968d;
+  border-radius: 999px;
+  padding: 2px 8px;
+  font-family: 'Outfit', sans-serif;
+  font-size: 10.5px;
+  line-height: 1.2;
+  cursor: pointer;
+}
+.task-inline-action:hover {
+  border-color: #4e4e4e;
+  color: #c0b8ae;
+}
+.task-inline-action.primary {
+  border-color: #5e7d5a;
+  color: #b8d2b1;
+}
+.task-inline-action:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.task-edit-row {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+.task-edit-input {
+  width: 100%;
+  background: #141414;
+  border: 1px solid #373737;
+  border-radius: 10px;
+  color: #e7e2da;
+  padding: 7px 10px;
+  font-family: 'Outfit', sans-serif;
+  font-size: 13.5px;
+}
+.task-edit-actions {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
 
 .task-assign-picker {
   margin-top: 8px;
@@ -438,7 +499,115 @@ body {
   justify-content:center; transition:transform 0.15s,opacity 0.15s; flex-shrink:0;
 }
 .add-btn:hover { transform:scale(1.06); opacity:0.9; }
+.add-attachment-row {
+  margin-top: 8px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.add-attach-btn {
+  border: 1px solid #373737;
+  background: #171717;
+  color: #b8b0a7;
+  border-radius: 10px;
+  padding: 6px 10px;
+  font-size: 11.5px;
+  cursor: pointer;
+}
+.add-attachment-hint {
+  font-size: 11px;
+  color: #8d857d;
+}
+.visually-hidden-file {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  border: 0;
+  clip: rect(0 0 0 0);
+  overflow: hidden;
+}
+.add-photo-pill {
+  border: 1px solid #3b3b3b;
+  background: #131313;
+  color: #c4bcb2;
+  border-radius: 999px;
+  padding: 3px 10px 3px 3px;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  cursor: zoom-in;
+  max-width: 100%;
+}
+.add-photo-pill img {
+  width: 26px;
+  height: 26px;
+  border-radius: 999px;
+  object-fit: cover;
+}
+.add-photo-pill span {
+  font-size: 11px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 180px;
+}
+.add-photo-remove {
+  border: 1px solid #4a3535;
+  background: #201717;
+  color: #d7aaaa;
+  border-radius: 9px;
+  padding: 5px 8px;
+  font-size: 11px;
+  cursor: pointer;
+}
 .footer-hint { font-size:10.5px; color:#968E85; text-align:center; margin-top:20px; letter-spacing:0.04em; }
+
+.image-viewer-root {
+  position: fixed;
+  inset: 0;
+  z-index: 1002;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 14px;
+}
+.image-viewer-backdrop {
+  position: absolute;
+  inset: 0;
+  border: none;
+  background: rgba(0, 0, 0, 0.75);
+}
+.image-viewer-panel {
+  position: relative;
+  z-index: 1;
+  width: min(92vw, 520px);
+  border: 1px solid #323232;
+  border-radius: 14px;
+  background: #0f0f0f;
+  padding: 10px;
+  box-shadow: 0 18px 60px rgba(0, 0, 0, 0.65);
+}
+.image-viewer-close {
+  position: absolute;
+  top: 4px;
+  right: 8px;
+  border: none;
+  background: transparent;
+  color: #ccc5bc;
+  font-size: 26px;
+  line-height: 1;
+  cursor: pointer;
+}
+.image-viewer-img {
+  width: 100%;
+  max-height: min(80vh, 560px);
+  object-fit: contain;
+  border-radius: 10px;
+  display: block;
+}
 
 .settings-btn {
   background: #1A1A1A;
@@ -724,6 +893,10 @@ body {
   .add-assign-picker {
     min-width: 0;
     width: 100%;
+  }
+
+  .add-photo-pill span {
+    max-width: 120px;
   }
 }
 
